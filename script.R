@@ -1,3 +1,4 @@
-#project script
+# project script
 
-# new
+# import data
+data <- read.csv("data/UMCSENT.csv")
