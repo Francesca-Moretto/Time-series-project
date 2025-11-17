@@ -78,5 +78,3 @@ Box.test(data_filtered$UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrela
 
 
 
-
-
