@@ -1,4 +1,84 @@
 # project script
 
-# import data
+# libraries
+library(ggplot2)
+library(urca)
+library(tseries)
+
 data <- read.csv("data/UMCSENT.csv")
+
+# 1. DATA PREPARATION ---------------------------------------------------------------------
+
+str(data) # observation_date chr; UMCSENT num
+data$observation_date <- as.Date(data$observation_date, format = "%Y-%m-%d") # observation_date conversion to Date
+str(data)
+
+sum(is.na(data$UMCSENT)) # check missing values
+mean(is.na(data$UMCSENT)) # percentage of missing values
+
+nrow(data)
+range(data$observation_date)
+
+ggplot(data, aes(x = observation_date, y = UMCSENT)) +
+  geom_line() +
+  labs(title = 'Consumer Sentiment Index')
+
+
+# data from 1978
+data_filtered <- subset(data, observation_date >= "1978-01-01")
+
+nrow(data_filtered)
+range(data_filtered$observation_date)
+ggplot(data_filtered, aes(x = observation_date, y = UMCSENT)) +
+  geom_line() +
+  labs(title = 'Consumer Sentiment Index')
+
+# statistics
+summary(data_filtered$UMCSENT)
+
+# check for outliers
+hist(data_filtered$UMCSENT, breaks = 20)
+boxplot(data_filtered$UMCSENT)
+
+
+# STATIONARITY TEST ------------------------------------------------------------------
+# ADF -> stationary
+summary(ur.df(data_filtered$UMCSENT, type = "drift"))
+
+# Conclusione su $\tau_2$:Confronto: 
+# Il valore della statistica test ($-3.3225$) è più negativo del valore critico al 
+# livello di significatività del 5% ($-2.86$).
+# Decisione: Poiché $-3.3225 < -2.86$, si rigetta l'Ipotesi Nulla ($H_0$) al livello del 5%.
+# Interpretazione: Si conclude che la serie storica UMCSENT è stazionaria (trend-stazionaria) al livello del 5%.
+# Non è necessario differenziare la serie per renderla stazionaria se si include un termine di drift.
+
+# KPSS -> non-stationary
+kpss.test(data_filtered$UMCSENT)
+
+# Il valore della statistica KPSS ($0.75044$) è maggiore sia del valore critico al 5% sia del valore critico all'1% ($\approx 0.739$).
+# Si rigetta $H_0$ anche al livello dell'1%.
+
+
+# AUTOCORRELATION --------------------------------------------------------------------
+acf(data_filtered$UMCSENT)
+pacf(data_filtered$UMCSENT)
+
+# SEASONALITY OR TREND ----------------------------------------------------------------
+data_ts <- ts(data_filtered$UMCSENT, start = c(1978, 01), frequency = 12)
+plot(stl(data_ts, s.window="periodic"))
+
+
+# FIRST DIFFERENCE -----------------------------------------------------------------------
+diff_1 <- diff(data_filtered$UMCSENT)
+acf(diff_1)
+pacf(diff_1)
+
+# correlation tests
+
+
+bartlett.test(data_filtered$UMCSENT ~ as.factor(cut(seq_along(data_filtered$UMCSENT), 10))) # suggests log-transformation
+
+Box.test(data_filtered$UMCSENT, lag = 10, type = "Box-Pierce") # high autocorrelation
+Box.test(diff_1, lag = 10, type = "Box-Pierce")
+
+Box.test(data_filtered$UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrelation
