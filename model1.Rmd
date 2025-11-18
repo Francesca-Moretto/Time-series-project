@@ -1,14 +1,22 @@
 
 ```{r}
-
-
+cutoff <- as.Date("2010-01-01")
+train <- subset(data_filtered, observation_date < cutoff)
+test <- subset(data_filtered, observation_date >= cutoff)
 
 ```
 
 
 ```{r}
 
+library(forecast)
+auto.arima(train$log_UMCSENT)
+```
 
+
+```{r}
+
+auto.arima(train$UMCSENT)
 
 ```
 
