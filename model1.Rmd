@@ -10,7 +10,7 @@ test <- subset(data_filtered, observation_date >= cutoff)
 ```{r}
 
 library(forecast)
-auto.arima(train$log_UMCSENT)
+auto.arima(train$log_UMCSENT) 
 ```
 
 
