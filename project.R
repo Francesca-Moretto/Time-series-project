@@ -63,6 +63,14 @@ kpss.test(data_filtered$UMCSENT)
 acf(data_filtered$UMCSENT)
 pacf(data_filtered$UMCSENT)
 
+# correlation tests
+bartlett.test(data_filtered$UMCSENT ~ as.factor(cut(seq_along(data_filtered$UMCSENT), 10))) # suggests log-transformation
+
+Box.test(data_filtered$UMCSENT, lag = 10, type = "Box-Pierce") # high autocorrelation
+Box.test(diff_1, lag = 10, type = "Box-Pierce")
+
+Box.test(data_filtered$UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrelation
+
 # SEASONALITY OR TREND ----------------------------------------------------------------
 data_ts <- ts(data_filtered$UMCSENT, start = c(1978, 01), frequency = 12)
 plot(stl(data_ts, s.window="periodic"))
@@ -73,12 +81,5 @@ diff_1 <- diff(data_filtered$UMCSENT)
 acf(diff_1)
 pacf(diff_1)
 
-# correlation tests
 
 
-bartlett.test(data_filtered$UMCSENT ~ as.factor(cut(seq_along(data_filtered$UMCSENT), 10))) # suggests log-transformation
-
-Box.test(data_filtered$UMCSENT, lag = 10, type = "Box-Pierce") # high autocorrelation
-Box.test(diff_1, lag = 10, type = "Box-Pierce")
-
-Box.test(data_filtered$UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrelation
