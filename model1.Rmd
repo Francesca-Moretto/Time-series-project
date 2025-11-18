@@ -16,6 +16,152 @@ cat("Training:", nrow(train), "rows\n")
 cat("Test:", nrow(test), "rows\n")
 ```
 
+```{r}
+library(forecast)
+
+# --- 1. CONFIGURAZIONE E INIZIALIZZAZIONE ---
+
+# La serie di training da usare per la stima (sostituisce 'y')
+y_series <- train$log_UMCSENT 
+# Se 'y_series' non è un oggetto 'ts', è bene convertirlo per Arima() se non lo è già.
+# Ad esempio:
+# y_series <- ts(y_series, frequency = 12) 
+
+# Inizializzazione delle matrici AIC e BIC (12 righe x 3 colonne)
+aic <- matrix(NaN, nrow = 12, ncol = 3)
+bic <- matrix(NaN, nrow = 12, ncol = 3)
+
+
+# --- 2. CICLO PER AR(p) E MA(q) (p/q da 1 a 12) ---
+for (ii in 1:12) {
+  
+  # A. Stima ARIMA(p, 1, 0)
+  tryCatch({
+    # USA: y_series (che è train$log_UMCSENT)
+    mhat_ar <- Arima(y_series, order = c(ii, 1, 0), method = "ML", include.mean = FALSE)
+    aic[ii, 1] <- mhat_ar$aic
+    bic[ii, 1] <- mhat_ar$bic
+  }, error = function(e) {
+    # Non è necessario stampare l'errore a meno che non si voglia il debug
+    # cat(paste("Errore nella stima AR(", ii, "): ", conditionMessage(e), "\n"))
+  })
+
+  # B. Stima ARIMA(0, 1, q)
+  tryCatch({
+    # USA: y_series
+    mhat_ma <- Arima(y_series, order = c(0, 1, ii), method = "ML", include.mean = FALSE)
+    aic[ii, 2] <- mhat_ma$aic
+    bic[ii, 2] <- mhat_ma$bic
+  }, error = function(e) {
+    # cat(paste("Errore nella stima MA(", ii, "): ", conditionMessage(e), "\n"))
+  })
+}
+
+# --- 3. CICLO PER ARMA(p, 1, q) MISTI (p=1,2 e q=1,2) ---
+ii <- 1
+for (pp in 1:2) {
+  for (qq in 1:2) {
+    # Stima ARIMA(p, 1, q)
+    tryCatch({
+      # USA: y_series
+      mhat_arma <- Arima(y_series, order = c(pp, 1, qq), method = "ML", include.mean = FALSE)
+      aic[ii, 3] <- mhat_arma$aic
+      bic[ii, 3] <- mhat_arma$bic
+      ii <- ii + 1
+    }, error = function(e) {
+      # Gestisce l'errore e passa al prossimo indice
+      # cat(paste("Errore nella stima ARMA(", pp, ", 1, ", qq, "): ", conditionMessage(e), "\n"))
+      ii <- ii + 1
+    })
+  }
+}
+
+# --- 4. PLOT DEI RISULTATI FILTRATI (ARIMA(p, 1, 0)) ---
+
+# Controlla quali modelli AR(p) hanno prodotto risultati validi (non NaN)
+valid_ar_models <- !is.nan(aic[, 1])
+
+# Vettori per l'asse X (p=1 a p=12)
+p_values <- 1:12
+
+# Crea un DataFrame per il plotting filtrando solo i valori validi
+df_plot_filtered <- data.frame(
+    p = p_values[valid_ar_models],
+    AIC = aic[valid_ar_models, 1],
+    BIC = bic[valid_ar_models, 1]
+)
+
+library(ggplot2)
+
+p <- ggplot(df_plot_filtered, aes(x = p)) +
+    geom_line(aes(y = AIC, colour = "AIC")) +
+    geom_point(aes(y = AIC, colour = "AIC"), shape = 1, size = 3) +
+    geom_line(aes(y = BIC, colour = "BIC")) +
+    geom_point(aes(y = BIC, colour = "BIC"), shape = 2, size = 3) +
+
+    labs(
+        title = "Criteri di Informazione per Modelli ARIMA(p, 1, 0)",
+        x = "Ordine AR (p)",
+        y = "Valore Criterio"
+    ) +
+    scale_colour_manual(name = "Criterio", values = c("AIC" = "red", "BIC" = "blue")) +
+    # Assicura che l'asse X mostri tutti i valori p
+    scale_x_continuous(breaks = p_values) +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom"
+    )
+
+print(p)
+```
+
+```{r}
+library(ggplot2)
+
+# --- 1. PREPARAZIONE DEI DATI FILTRATI (Colonna 2 per MA(q)) ---
+
+# Controlla quali modelli MA(q) hanno prodotto risultati validi (non NaN)
+valid_ma_models <- !is.nan(aic[, 2])
+
+# Vettori per l'asse X (q=1 a q=12)
+q_values <- 1:12
+
+# Crea un DataFrame per il plotting filtrando solo i valori validi
+df_plot_ma_filtered <- data.frame(
+    q = q_values[valid_ma_models],
+    AIC = aic[valid_ma_models, 2],
+    BIC = bic[valid_ma_models, 2]
+)
+
+# --- 2. GENERAZIONE DEL GRAFICO ---
+
+p_ma <- ggplot(df_plot_ma_filtered, aes(x = q)) +
+    # Linea e punti per AIC
+    geom_line(aes(y = AIC, colour = "AIC")) +
+    geom_point(aes(y = AIC, colour = "AIC"), shape = 1, size = 3) +
+    # Linea e punti per BIC
+    geom_line(aes(y = BIC, colour = "BIC")) +
+    geom_point(aes(y = BIC, colour = "BIC"), shape = 2, size = 3) +
+
+    labs(
+        title = "Criteri di Informazione per Modelli ARIMA(0, 1, q)",
+        x = "Ordine MA (q)",
+        y = "Valore Criterio"
+    ) +
+    # Imposta i colori e la legenda
+    scale_colour_manual(name = "Criterio", values = c("AIC" = "red", "BIC" = "blue")) +
+    # Assicura che l'asse X mostri tutti i valori q
+    scale_x_continuous(breaks = q_values) +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom"
+    )
+
+print(p_ma)
+```
+
 
 ```{r}
 
