@@ -1,4 +1,9 @@
-#Project
+---
+title: "Preprocessing"
+output: html_document
+---
+
+## Preprocessing analysis
 
 ```{r}
 #libraries and data upload 
@@ -31,7 +36,6 @@ ggplot(data, aes(x = observation_date, y = UMCSENT)) +
 #Data preparation and summaries
 # data from 1978
 data_filtered <- subset(data, observation_date >= "1978-01-01")
-
 nrow(data_filtered)
 range(data_filtered$observation_date)
 ggplot(data_filtered, aes(x = observation_date, y = UMCSENT)) +
@@ -60,6 +64,11 @@ kpss.test(data_filtered$UMCSENT)
 # AUTOCORRELATION --------------------------------------------------------------------
 acf(data_filtered$UMCSENT)
 pacf(data_filtered$UMCSENT)
+
+```
+```{r}
+#first difference
+diff_1 <- diff(data_filtered$UMCSENT)
 ```
 
 ```{r}
@@ -75,6 +84,7 @@ Box.test(data_filtered$UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrela
 ```
 
 ```{r}
+#data filtered
 data_filtered$log_UMCSENT <- log(data_filtered$UMCSENT)
 
 diff_log <- diff(data_filtered$log_UMCSENT)
@@ -87,6 +97,7 @@ head(data_filtered)
 ```
 
 ```{r}
+#acf and pacf of filtered data
 acf(na.omit(data_filtered$diff_log_UMCSENT))
 pacf(na.omit(data_filtered$diff_log_UMCSENT))
 ```
