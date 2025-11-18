@@ -9,7 +9,6 @@ data <- read.csv("data/UMCSENT.csv")
 
 ```
 
-
 ```{r}
 #Raw data analysis
 str(data) # observation_date chr; UMCSENT num
@@ -27,6 +26,7 @@ ggplot(data, aes(x = observation_date, y = UMCSENT)) +
   labs(title = 'Consumer Sentiment Index')
 
 ```
+
 ```{r}
 #Data preparation and summaries
 # data from 1978
@@ -46,6 +46,7 @@ hist(data_filtered$UMCSENT, breaks = 20)
 boxplot(data_filtered$UMCSENT)
 
 ```
+
 ```{r}
 # STATIONARITY TEST ------------------------------------------------------------------
 # ADF -> stationary
@@ -54,17 +55,14 @@ summary(ur.df(data_filtered$UMCSENT, type = "drift"))
 kpss.test(data_filtered$UMCSENT)
 
 ```
+
 ```{r}
 # AUTOCORRELATION --------------------------------------------------------------------
 acf(data_filtered$UMCSENT)
 pacf(data_filtered$UMCSENT)
 ```
-```{r}
-# FIRST DIFFERENCE -----------------------------------------------------------------------
-diff_1 <- diff(data_filtered$UMCSENT)
-acf(diff_1)
-pacf(diff_1)
 
+```{r}
 # CORRELATION TEST
 #Barletts' bands
 bartlett.test(data_filtered$UMCSENT ~ as.factor(cut(seq_along(data_filtered$UMCSENT), 10))) # suggests log-transformation
@@ -76,5 +74,19 @@ Box.test(data_filtered$UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrela
 
 ```
 
+```{r}
+data_filtered$log_UMCSENT <- log(data_filtered$UMCSENT)
 
+diff_log <- diff(data_filtered$log_UMCSENT)
 
+alligned_diff_log <- c(NA, diff_log)
+
+data_filtered$diff_log_UMCSENT <- alligned_diff_log
+
+head(data_filtered)
+```
+
+```{r}
+acf(na.omit(data_filtered$diff_log_UMCSENT))
+pacf(na.omit(data_filtered$diff_log_UMCSENT))
+```
