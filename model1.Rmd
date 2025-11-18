@@ -1,4 +1,8 @@
-
+---
+title: "First model analysis"
+output: html_document
+---
+## Split into training and test samples
 ```{r}
 cutoff <- as.Date("2010-01-01")
 train <- subset(data_filtered, observation_date < cutoff)
