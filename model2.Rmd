@@ -1,0 +1,82 @@
+---
+title: "model2"
+output: html_document
+date: "2025-11-18"
+---
+
+```{r}
+
+model_arima_110 <- arima(
+  data_filtered$log_UMCSENT,
+  order = c(1, 1, 0),
+  method = "ML"
+)
+
+summary(model_arima_110)
+```
+
+
+```{r}
+library(forecast)
+
+```
+
+```{r}
+full_series <- data_filtered$log_UMCSENT 
+h_steps <- length(test$log_UMCSENT)
+
+rolling_predictions <- numeric(h_steps)
+
+n_train_initial <- length(train$log_UMCSENT)
+
+for (i in 1:h_steps) {
+  current_train_window <- full_series[1:(n_train_initial + i - 1)]
+  current_model <- arima(
+    current_train_window,
+    order = c(1, 1, 1),
+    method = "ML"
+  )
+  
+  forecast_one_step <- forecast(current_model, h = 1)
+  
+  rolling_predictions[i] <- as.numeric(forecast_one_step$mean)
+}
+
+
+# 1. Assicurati che il ciclo 'for' per rolling_predictions sia stato eseguito
+# ... (il codice del ciclo for va qui) ...
+
+# 2. Crea il DataFrame di confronto
+comparison_df_rolling <- data.frame(
+  Indice_Tempo = seq_along(test$log_UMCSENT), # Numero della riga nel test set
+  Valore_Effettivo = test$log_UMCSENT,        # I valori reali osservati
+  Previsione_Rolling = rolling_predictions,    # I valori previsti a 1-passo
+  Errore = test$log_UMCSENT - rolling_predictions # Calcolo dell'errore (Effettivo - Previsto)
+)
+
+# 3. Stampa il DataFrame di confronto
+print(comparison_df_rolling)
+```
+
+```{r}
+
+# 1. Calcola gli errori (residui)
+errors <- test$log_UMCSENT - rolling_predictions
+
+# 2. Calcola gli errori al quadrato
+squared_errors <- errors^2
+
+# 3. Calcola la media degli errori al quadrato (MSE)
+mean_squared_error <- mean(squared_errors)
+
+# 4. Calcola la radice quadrata (RMSE)
+rmse_value <- sqrt(mean_squared_error)
+
+# Stampa il risultato
+print(paste("L'RMSE del modello ARIMA(0,1,0) è:", round(rmse_value, 6)))
+
+```
+ARIMA (0,1,0): 0.060701
+ARIMA (1,1,0): 0.060719
+ARIMA (0,1,1): 0.060716
+ARIMA (1,1,1): 0.061083
