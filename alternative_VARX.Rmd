@@ -1,0 +1,214 @@
+---
+title: "alternative_model_2"
+output: html_document
+date: "2025-11-19"
+---
+
+```{r}
+
+# ==============================================================
+# Forecasting pipeline: read FRED csv -> transform -> VAR rolling
+# ==============================================================
+
+# 0. librerie (installano se mancanti)
+packages <- c("xts","zoo","vars","forecast","quantmod","ggplot2")
+to_install <- packages[!packages %in% installed.packages()[,"Package"]]
+if(length(to_install)) install.packages(to_install, dependencies = TRUE)
+library(xts); library(zoo); library(vars); library(forecast)
+library(quantmod); library(ggplot2)
+
+# 1. funzione robusta per leggere CSV di FRED (data/, colonna1=date, col2=value)
+read_fred_csv <- function(filename, col_name) {
+  path <- file.path("data", filename)
+  if(!file.exists(path)) {
+    warning("File mancante: ", path)
+    return(NULL)
+  }
+  df <- read.csv(path, stringsAsFactors = FALSE)
+  # supporto formati data comuni
+  dates <- as.Date(df[,1], tryFormats = c("%Y-%m-%d","%d/%m/%Y","%Y/%m/%d"))
+  values <- as.numeric(df[,2])
+  clean <- na.omit(data.frame(Date = dates, Value = values))
+  if(nrow(clean) == 0) return(NULL)
+  xts_obj <- xts(clean$Value, order.by = clean$Date)
+  colnames(xts_obj) <- col_name
+  return(xts_obj)
+}
+
+# 2. carica le serie (sostituisci i nomi file se diversi)
+UMCSENT <- read_fred_csv("UMCSENT.csv", "Sentiment")
+WTISPLC  <- read_fred_csv("WTISPLC.csv", "Oil")
+PI       <- read_fred_csv("PI.csv", "Income")
+CPIAUCSL <- read_fred_csv("CPIAUCSL.csv", "CPI")
+UNRATE   <- read_fred_csv("UNRATE.csv", "Unrate")
+INDPRO   <- read_fred_csv("INDPRO.csv", "IndPro")
+FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
+
+# controlla che la serie target esista
+if(is.null(UMCSENT)) stop("Errore: manca UMCSENT.csv in data/")
+
+# 3. Trasformazioni (log-diff per la maggior parte, diff per alcune serie)
+#    - target: diff(log(UMCSENT)) -> d_log_Sent
+#    - Oil, Income, CPI, IndPro -> diff(log)
+#    - Unrate, FedFunds -> simple diff (variazione)
+transform_for_model <- function(xts_obj, method = c("dlog","diff")) {
+  method <- match.arg(method)
+  if(is.null(xts_obj)) return(NULL)
+  if(method == "dlog") {
+    if(any(coredata(xts_obj) <= 0, na.rm = TRUE)) {
+      # se valori non positivi -> log non possibile, usa diff raw come fallback
+      res <- diff(xts_obj)
+    } else {
+      res <- diff(log(xts_obj))
+    }
+  } else {
+    res <- diff(xts_obj)
+  }
+  return(res)
+}
+
+d_log_sent <- transform_for_model(UMCSENT, "dlog")
+d_log_oil  <- transform_for_model(WTISPLC, "dlog")
+d_log_inc  <- transform_for_model(PI, "dlog")
+d_log_cpi  <- transform_for_model(CPIAUCSL, "dlog")
+d_unrate   <- transform_for_model(UNRATE, "diff")
+d_log_ip   <- transform_for_model(INDPRO, "dlog")
+d_fed      <- transform_for_model(FEDFUNDS, "diff")
+
+# opzionale: S&P500 (se vuoi scaricarlo; ignora se non vuoi dipendenza da internet)
+d_log_sp  <- NULL
+try({
+  getSymbols("^GSPC", src = "yahoo", from = "1978-01-01", auto.assign = TRUE, warnings = FALSE)
+  # prendiamo prezzo di chiusura (GSPC$GSPC.Close) e lo rendiamo mensile
+  gspc_monthly <- to.monthly(GSPC[,6], indexAt = "firstof", OHLC = FALSE)
+  d_log_sp <- diff(log(gspc_monthly))
+  colnames(d_log_sp) <- "d_log_Stock"
+}, silent = TRUE)
+
+# 4. merge delle serie - intersection (date comuni)
+list_series <- list(d_log_sent, d_log_oil, d_log_inc, d_log_cpi, d_unrate, d_log_ip, d_fed, d_log_sp)
+# keep only non-NULL
+list_series <- list_series[!sapply(list_series, is.null)]
+data_merged_xts <- do.call(merge, list_series)
+data_merged_xts <- na.omit(data_merged_xts)
+
+# filtra da 1978-01-01 in poi (se già lo è non cambia nulla)
+data_merged_xts <- data_merged_xts[index(data_merged_xts) >= "1978-01-01"]
+
+if(nrow(data_merged_xts) < 36) stop("Poche osservazioni dopo le trasformazioni: controlla i CSV e le trasformazioni.")
+
+cat("Variabili disponibili (dopo trasformazioni):", paste(colnames(data_merged_xts), collapse = ", "), "\n")
+cat("Numero osservazioni:", nrow(data_merged_xts), "\n")
+
+# mantieni copia con date per il plotting/test
+data_xts_full <- data_merged_xts
+
+# 5. converti in oggetto 'ts' mensile per VAR (start anno, mese, freq=12)
+first_date <- index(data_xts_full)[1]
+start_year <- as.integer(format(first_date, "%Y"))
+start_month <- as.integer(format(first_date, "%m"))
+data_ts <- ts(coredata(data_xts_full), start = c(start_year, start_month), frequency = 12)
+colnames(data_ts) <- colnames(data_xts_full)
+
+# 6. train/test split (80% train)
+n_total <- nrow(data_ts)
+n_train <- floor(0.8 * n_total)
+n_test  <- n_total - n_train
+train_ts <- window(data_ts, end = c(start_year + (n_train-1 + start_month -1)/12))
+test_ts  <- window(data_ts, start = time(data_ts)[n_train + 1])
+
+cat("Osservazioni train:", n_train, " test:", n_test, "\n")
+
+# 7. selezione lag ottimale (BIC/SC)
+lag_sel <- VARselect(train_ts, lag.max = 8, type = "const")
+optimal_p <- as.integer(lag_sel$selection["SC(n)"])  # BIC (SC)
+if(is.na(optimal_p) || length(optimal_p)==0) optimal_p <- lag_sel$selection[1]  # fallback
+cat("Lag selezionato (BIC / SC):", optimal_p, "\n")
+
+# 8. Rolling 1-step ahead forecast con VAR (expanding window)
+h_steps <- n_test
+target_name <- colnames(data_ts)[1]   # assumiamo target sia la prima colonna: "d_log_Sent"
+rolling_preds_var <- numeric(h_steps)
+rolling_preds_naive <- numeric(h_steps)  # benchmark: persistence (last observed value)
+
+# matrix di dati per slicing rapido
+data_mat <- as.matrix(data_ts)
+
+for(i in 1:h_steps) {
+  # finestra di training espandente
+  end_row <- n_train + i - 1
+  train_subset <- data_mat[1:end_row, , drop = FALSE]
+  # convertiamo a ts per VAR
+  # calcoliamo start e fine per la sottoserie
+  sub_start_time <- time(data_ts)[1]
+  sub_start <- c(start_year, start_month)
+  sub_ts <- ts(train_subset, start = sub_start, frequency = 12)
+  colnames(sub_ts) <- colnames(data_ts)
+  
+  # stima VAR e previsione 1-step
+  fc_val <- NA
+  try({
+    curr_var <- VAR(sub_ts, p = optimal_p, type = "const")
+    fc <- predict(curr_var, n.ahead = 1)
+    # predict returns list $fcst where each element named after variable
+    fc_val <- as.numeric(fc$fcst[[target_name]][1, "fcst"])
+  }, silent = TRUE)
+  
+  # fallback: se predict fallisce, uso ultimo valore osservato (persistenza)
+  if(is.na(fc_val)) {
+    fc_val <- train_subset[nrow(train_subset), which(colnames(data_mat) == target_name)]
+  }
+  rolling_preds_var[i] <- fc_val
+  
+  # naive persistence benchmark: last observed value in the expanding window
+  rolling_preds_naive[i] <- train_subset[nrow(train_subset), which(colnames(data_mat) == target_name)]
+}
+
+# 9. valutazione (confronto su test set)
+actual_vec <- as.numeric(test_ts[, target_name])
+if(length(actual_vec) != length(rolling_preds_var)) stop("Mismatch lunghezze test / predizioni")
+
+rmse <- function(a,b) sqrt(mean((a-b)^2))
+mae  <- function(a,b) mean(abs(a-b))
+
+rmse_var   <- rmse(actual_vec, rolling_preds_var)
+mae_var    <- mae(actual_vec, rolling_preds_var)
+rmse_naive <- rmse(actual_vec, rolling_preds_naive)
+mae_naive  <- mae(actual_vec, rolling_preds_naive)
+
+results <- data.frame(
+  Model = c("Naive Persistence","VAR (expanding rolling)"),
+  RMSE  = c(rmse_naive, round(rmse_var, 6)),
+  MAE   = c(round(mae_naive, 6), round(mae_var, 6))
+)
+print("=== Performance ===")
+print(results)
+
+# 10. grafico confronto: reale vs var forecast (date reali prese dall'xts)
+test_index_dates <- index(data_xts_full)[(n_train+1):n_total]
+df_plot <- data.frame(
+  Date = as.Date(test_index_dates),
+  Actual = actual_vec,
+  VAR_Forecast = rolling_preds_var,
+  Naive = rolling_preds_naive
+)
+
+library(tidyr)
+df_long <- pivot_longer(df_plot, cols = c("Actual","VAR_Forecast","Naive"),
+                        names_to = "Series", values_to = "Value")
+
+ggplot(df_long, aes(x = Date, y = Value, color = Series)) +
+  geom_line(size = 1) +
+  labs(title = paste("Forecast (target =", target_name, ")"),
+       subtitle = paste("VAR lag =", optimal_p, "| obs train:", n_train, "test:", n_test),
+       x = "Time", y = "Value (transformed)") +
+  theme_minimal()
+
+# 11. stampa breve sintesi
+cat("\nSummary:\n")
+cat("Target:", target_name, "\n")
+cat("Osservazioni totali:", n_total, " train:", n_train, " test:", n_test, "\n")
+cat("RMSE VAR:", round(rmse_var,6), " RMSE Naive:", round(rmse_naive,6), "\n")
+
+```
+
