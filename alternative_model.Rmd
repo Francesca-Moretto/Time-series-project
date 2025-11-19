@@ -1,0 +1,27 @@
+---
+title: "Alternative model"
+output: html_document
+date: "2025-11-19"
+---
+
+```{r}
+
+
+```
+
+
+```{r}
+
+
+
+```
+
+
+
+```{r}
+
+
+
+```
+
+
