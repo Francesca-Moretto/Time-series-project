@@ -71,7 +71,7 @@ tryCatch({
   colnames(ts_stock) <- "StockMkt"
 }, error = function(e) {
   warning("Impossibile scaricare S&P500. Il modello proseguirà senza.")
-  ts_stock <- NULL
+  ts_stock <- NULL 
 })
 
 # --- BLOCCO 3: UNIONE E TRASFORMAZIONI ---
