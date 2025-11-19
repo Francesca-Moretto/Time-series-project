@@ -1,0 +1,202 @@
+---
+title: "alternative_ARIMAX"
+output: html_document
+date: "2025-11-19"
+---
+
+```{r}
+# ==============================================================
+# Forecasting pipeline: read FRED csv -> transform -> ARIMAX rolling
+# ==============================================================
+
+# 0. librerie (installano se mancanti)
+packages <- c("xts","zoo","forecast","quantmod","ggplot2","tidyr")
+to_install <- packages[!packages %in% installed.packages()[,"Package"]]
+if(length(to_install)) install.packages(to_install, dependencies = TRUE)
+
+library(xts); library(zoo); library(forecast)
+library(quantmod); library(ggplot2); library(tidyr)
+
+# 1. funzione robusta per leggere CSV FRED
+read_fred_csv <- function(filename, col_name) {
+  path <- file.path("data", filename)
+  if(!file.exists(path)) {
+    warning("File mancante: ", path)
+    return(NULL)
+  }
+  df <- read.csv(path, stringsAsFactors = FALSE)
+  dates <- as.Date(df[,1], tryFormats = c("%Y-%m-%d","%d/%m/%Y","%Y/%m/%d"))
+  values <- as.numeric(df[,2])
+  clean <- na.omit(data.frame(Date = dates, Value = values))
+  if(nrow(clean) == 0) return(NULL)
+  xts_obj <- xts(clean$Value, order.by = clean$Date)
+  colnames(xts_obj) <- col_name
+  return(xts_obj)
+}
+
+# 2. carica le serie
+UMCSENT <- read_fred_csv("UMCSENT.csv", "Sentiment")
+WTISPLC  <- read_fred_csv("WTISPLC.csv", "Oil")
+PI       <- read_fred_csv("PI.csv", "Income")
+CPIAUCSL <- read_fred_csv("CPIAUCSL.csv", "CPI")
+UNRATE   <- read_fred_csv("UNRATE.csv", "Unrate")
+INDPRO   <- read_fred_csv("INDPRO.csv", "IndPro")
+FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
+
+if(is.null(UMCSENT)) stop("Errore: manca UMCSENT.csv in data/")
+
+# 3. trasformazioni
+transform_for_model <- function(xts_obj, method = c("dlog","diff")) {
+  method <- match.arg(method)
+  if(is.null(xts_obj)) return(NULL)
+  if(method == "dlog") {
+    if(any(coredata(xts_obj) <= 0, na.rm = TRUE)) {
+      res <- diff(xts_obj)
+    } else {
+      res <- diff(log(xts_obj))
+    }
+  } else {
+    res <- diff(xts_obj)
+  }
+  return(res)
+}
+
+d_log_sent <- transform_for_model(UMCSENT, "dlog")
+d_log_oil  <- transform_for_model(WTISPLC, "dlog")
+d_log_inc  <- transform_for_model(PI, "dlog")
+d_log_cpi  <- transform_for_model(CPIAUCSL, "dlog")
+d_unrate   <- transform_for_model(UNRATE, "diff")
+d_log_ip   <- transform_for_model(INDPRO, "dlog")
+d_fed      <- transform_for_model(FEDFUNDS, "diff")
+
+d_log_sp  <- NULL
+try({
+  getSymbols("^GSPC", src = "yahoo", from = "1978-01-01", auto.assign = TRUE, warnings = FALSE)
+  gspc_monthly <- to.monthly(GSPC[,6], indexAt = "firstof", OHLC = FALSE)
+  d_log_sp <- diff(log(gspc_monthly))
+  colnames(d_log_sp) <- "d_log_Stock"
+}, silent = TRUE)
+
+# 4. merge series comuni
+list_series <- list(d_log_sent, d_log_oil, d_log_inc, d_log_cpi, d_unrate, d_log_ip, d_fed, d_log_sp)
+list_series <- list_series[!sapply(list_series, is.null)]
+data_merged_xts <- do.call(merge, list_series)
+data_merged_xts <- na.omit(data_merged_xts)
+data_merged_xts <- data_merged_xts[index(data_merged_xts) >= "1978-01-01"]
+
+if(nrow(data_merged_xts) < 36) stop("Poche osservazioni dopo le trasformazioni.")
+
+cat("Variabili disponibili:", paste(colnames(data_merged_xts), collapse = ", "), "\n")
+
+data_xts_full <- data_merged_xts
+
+# 5. converti in ts
+first_date <- index(data_xts_full)[1]
+start_year <- as.integer(format(first_date, "%Y"))
+start_month <- as.integer(format(first_date, "%m"))
+
+data_ts <- ts(coredata(data_xts_full), start = c(start_year, start_month), frequency = 12)
+colnames(data_ts) <- colnames(data_xts_full)
+
+# 6. train/test split
+n_total <- nrow(data_ts)
+n_train <- floor(0.8 * n_total)
+n_test  <- n_total - n_train
+
+train_ts <- data_ts[1:n_train, , drop = FALSE]
+test_ts  <- data_ts[(n_train+1):n_total, , drop = FALSE]
+
+# target: prima colonna
+target_name <- colnames(data_ts)[1]
+
+# regressori = tutte le altre colonne
+regressors <- colnames(data_ts)[-1]
+
+cat("Target:", target_name, "\n")
+cat("Regressori ARIMAX:", paste(regressors, collapse = ", "), "\n")
+
+# 7. ARIMAX rolling expanding
+h_steps <- n_test
+rolling_preds_arimax <- numeric(h_steps)
+rolling_preds_naive  <- numeric(h_steps)
+
+for(i in 1:h_steps) {
+  
+  # dataset espanso fino a t = train + (i-1)
+  end_row <- n_train + i - 1
+  
+  y_roll <- data_ts[1:end_row, target_name]
+  X_roll <- data_ts[1:end_row, regressors, drop = FALSE]
+  
+  X_new  <- matrix(data_ts[n_train + i, regressors], nrow = 1)
+  
+  # stima ARIMAX
+  fc_val <- NA
+  try({
+    fit <- auto.arima(
+      y_roll,
+      xreg = X_roll,
+      seasonal = FALSE,
+      stepwise = FALSE,
+      approximation = FALSE
+    )
+    pred <- forecast(fit, h = 1, xreg = X_new)
+    fc_val <- as.numeric(pred$mean)
+  }, silent = TRUE)
+  
+  # fallback: naive
+  if(is.na(fc_val)) {
+    fc_val <- y_roll[length(y_roll)]
+  }
+  
+  rolling_preds_arimax[i] <- fc_val
+  
+  # naive persistence
+  rolling_preds_naive[i] <- y_roll[length(y_roll)]
+}
+
+# 8. valutazione
+actual_vec <- test_ts[, target_name]
+
+rmse <- function(a,b) sqrt(mean((a-b)^2))
+mae  <- function(a,b) mean(abs(a-b))
+
+rmse_arimax <- rmse(actual_vec, rolling_preds_arimax)
+mae_arimax  <- mae(actual_vec, rolling_preds_arimax)
+rmse_naive  <- rmse(actual_vec, rolling_preds_naive)
+mae_naive   <- mae(actual_vec, rolling_preds_naive)
+
+results <- data.frame(
+  Model = c("Naive","ARIMAX rolling"),
+  RMSE  = c(round(rmse_naive,6), round(rmse_arimax,6)),
+  MAE   = c(round(mae_naive,6), round(mae_arimax,6))
+)
+print(results)
+
+# 9. grafico
+test_index_dates <- index(data_xts_full)[(n_train+1):n_total]
+
+df_plot <- data.frame(
+  Date = as.Date(test_index_dates),
+  Actual = actual_vec,
+  ARIMAX = rolling_preds_arimax,
+  Naive = rolling_preds_naive
+)
+
+df_long <- pivot_longer(df_plot, cols = c("Actual","ARIMAX","Naive"),
+                        names_to = "Series", values_to = "Value")
+
+ggplot(df_long, aes(x = Date, y = Value, color = Series)) +
+  geom_line(size = 1) +
+  labs(title = paste("ARIMAX rolling forecast (target =", target_name, ")"),
+       subtitle = paste("Obs train:", n_train, "test:", n_test),
+       x = "Time", y = "Value (transformed)") +
+  theme_minimal()
+
+# 10. summary
+cat("\nSummary:\n")
+cat("RMSE ARIMAX:", round(rmse_arimax,6), " | RMSE Naive:", round(rmse_naive,6), "\n")
+cat("MAE ARIMAX :", round(mae_arimax,6),  " | MAE Naive :", round(mae_naive,6), "\n")
+
+```
+
