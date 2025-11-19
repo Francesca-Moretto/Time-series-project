@@ -3,7 +3,6 @@ title: "Alternative model"
 output: html_document
 date: "2025-11-19"
 ---
-
 ```{r}
 library(xts)
 
@@ -53,7 +52,9 @@ print("Variabili importate e unite correttamente:")
 print(colnames(data_all))
 
 head(data_all)
+```
 
+```{r}
 library(forecast)
 library(tidyverse)
 
@@ -145,7 +146,6 @@ ggplot(df_plot_long, aes(Date, Value, color = Series)) +
        x = "Time") +
   theme_minimal()
 
-```{r}
 
 # --- BLOCCO UNICO CORRETTO E ROBUSTO ---
 
