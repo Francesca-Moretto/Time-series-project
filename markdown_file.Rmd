@@ -52,7 +52,7 @@ boxplot(data_filtered$UMCSENT)
 ```
 
 ```{r}
-# STATIONARITY TEST ------------------------------------------------------------------
+# STATIONARITY TEST ---------------------------------------------------------------
 # ADF -> stationary
 summary(ur.df(data_filtered$UMCSENT, type = "drift"))
 # KPSS -> non-stationary
@@ -61,11 +61,12 @@ kpss.test(data_filtered$UMCSENT)
 ```
 
 ```{r}
-# AUTOCORRELATION --------------------------------------------------------------------
+# AUTOCORRELATION ----------------------------------------------------------------
 acf(data_filtered$UMCSENT)
 pacf(data_filtered$UMCSENT)
 
 ```
+
 ```{r}
 #first difference
 diff_1 <- diff(data_filtered$UMCSENT)
