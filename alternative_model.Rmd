@@ -5,183 +5,106 @@ date: "2025-11-19"
 ---
 
 ```{r}
-# --- BLOCCO 1: CARICAMENTO LIBRERIE E FUNZIONI ROBUSTE ---
-library(vars)
-library(tseries)
-library(ggplot2)
 library(xts)
-library(quantmod)
 
-# Funzione "Robusta" per leggere i CSV di FRED
-read_fred_csv <- function(filename, col_name) {
-  path <- paste0("data/", filename)
-  
-  if (!file.exists(path)) {
-    warning(paste("File non trovato:", path))
-    return(NULL)
-  }
-  
-  # Leggi il CSV assicurandosi che le stringhe non siano fattori
-  df <- read.csv(path, stringsAsFactors = FALSE)
-  
-  # Selezione per indice (Colonna 1 = Data, Colonna 2 = Valore)
-  # Questo evita errori se la colonna si chiama "observation_date" invece di "DATE"
-  raw_dates <- df[, 1]
-  raw_values <- df[, 2]
-  
-  # Conversione sicura
-  dates <- as.Date(raw_dates, tryFormats = c("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"))
-  values <- as.numeric(raw_values) # Forza numerico (converte stringhe errate in NA)
-  
-  # Creiamo un dataframe temporaneo e rimuoviamo righe con NA (Date o Valori mancanti)
-  clean_df <- data.frame(Date = dates, Value = values)
-  clean_df <- na.omit(clean_df)
-  
-  if (nrow(clean_df) == 0) {
-    warning(paste("Il file", filename, "è vuoto o ha formati data non validi."))
-    return(NULL)
-  }
-  
-  # Creazione oggetto xts
-  ts_data <- xts(clean_df$Value, order.by = clean_df$Date)
-  colnames(ts_data) <- col_name
-  
-  return(ts_data)
+# --------------------------------------------------
+# 2. FUNZIONE SEMPLICE PER IMPORTARE CSV FRED
+# --------------------------------------------------
+
+read_fred <- function(filename, col_name) {
+  df <- read.csv(paste0("data/", filename), stringsAsFactors = FALSE)
+
+  # Assume che la colonna 1 sia la data e la colonna 2 il valore
+  df$Date <- as.Date(df[,1])
+  df$Value <- as.numeric(df[,2])
+
+  df <- na.omit(df)
+
+  xts_obj <- xts(df$Value, order.by = df$Date)
+  colnames(xts_obj) <- col_name
+
+  return(xts_obj)
 }
 
-# --- BLOCCO 2: CARICAMENTO DATI ---
+# --------------------------------------------------
+# 3. CARICAMENTO DELLE SERIE
+# --------------------------------------------------
 
-# Variabile Target
-ts_sent   <- read_fred_csv("UMCSENT.csv", "Sentiment")
+UMCSENT <- read_fred("UMCSENT.csv",   "Sentiment")
+oil    <- read_fred("WTISPLC.csv",   "Oil")
+income <- read_fred("PI.csv",        "Income")
+cpi    <- read_fred("CPIAUCSL.csv",  "CPI")
+unrate <- read_fred("UNRATE.csv",    "Unemployment")
+ip     <- read_fred("INDPRO.csv",    "IndProd")
+fed    <- read_fred("FEDFUNDS.csv",  "FedFunds")
 
-# Variabili Esplicative (dai tuoi file caricati)
-ts_oil    <- read_fred_csv("WTISPLC.csv", "Oil")       
-ts_inc    <- read_fred_csv("PI.csv", "Income")         
-ts_cpi    <- read_fred_csv("CPIAUCSL.csv", "CPI")      
-ts_unrate <- read_fred_csv("UNRATE.csv", "Unrate")     
-ts_ip     <- read_fred_csv("INDPRO.csv", "IndPro")     
-ts_fed    <- read_fred_csv("FEDFUNDS.csv", "FedFunds") 
+# --------------------------------------------------
+# 4. UNIONE SEMPLICE DELLE SERIE (INTERSEZIONE DATE)
+# --------------------------------------------------
 
-# S&P 500 (da Yahoo Finance per coprire lo storico)
-tryCatch({
-  # Scarica dati mensili
-  getSymbols("^GSPC", src = "yahoo", from = "1978-01-01", auto.assign = TRUE)
-  # Prende la chiusura aggiustata e converte a fine mese
-  ts_stock <- to.monthly(GSPC[,6], indexAt = "firstof", OHLC = FALSE)
-  colnames(ts_stock) <- "StockMkt"
-}, error = function(e) {
-  warning("Impossibile scaricare S&P500. Il modello proseguirà senza.")
-  ts_stock <- NULL 
-})
+data_all <- merge(UMCSENT, oil, income, cpi, unrate, ip, fed)
+data_all <- na.omit(data_all)
 
-# --- BLOCCO 3: UNIONE E TRASFORMAZIONI ---
+# Filtra dal 1978
+data_all <- data_all[index(data_all) >= "1978-01-01"]
 
-# Lista di tutte le serie
-list_data <- list(ts_sent, ts_oil, ts_inc, ts_cpi, ts_unrate, ts_ip, ts_fed, ts_stock)
-# Rimuovi eventuali NULL (serie non caricate)
-list_data <- list_data[!sapply(list_data, is.null)]
+# Risultato finale
+print("Variabili importate e unite correttamente:")
+print(colnames(data_all))
 
-# Merge allineando le date (intersezione)
-data_var <- do.call(merge, list_data)
-data_var <- na.omit(data_var)
+head(data_all)
 
-# Filtro temporale dal 1978
-data_var <- data_var[index(data_var) >= "1978-01-01"]
-
-print("Dataset caricato correttamente. Variabili:")
-print(colnames(data_var))
-
-# --- TRASFORMAZIONI (Log-Diff e Diff) ---
-safe_diff_log <- function(data, col) if(col %in% colnames(data)) diff(log(data[, col])) else NULL
-safe_diff     <- function(data, col) if(col %in% colnames(data)) diff(data[, col]) else NULL
-
-list_trans <- list()
-
-# Target
-list_trans$d_log_Sent <- safe_diff_log(data_var, "Sentiment")
-
-# Esplicative
-list_trans$d_log_Oil   <- safe_diff_log(data_var, "Oil")
-list_trans$d_log_Inc   <- safe_diff_log(data_var, "Income")
-list_trans$d_log_CPI   <- safe_diff_log(data_var, "CPI")      
-list_trans$d_log_IP    <- safe_diff_log(data_var, "IndPro")   
-list_trans$d_log_Stock <- safe_diff_log(data_var, "StockMkt") 
-
-list_trans$d_Unrate    <- safe_diff(data_var, "Unrate")       
-list_trans$d_FedFunds  <- safe_diff(data_var, "FedFunds")     
-
-# Unione trasformate
-data_var_trans <- do.call(merge, list_trans)
-data_var_trans <- na.omit(data_var_trans)
-
-# --- BLOCCO 4: SPLIT E STIMA VAR ---
-
-# Split
-n_obs <- nrow(data_var_trans)
-split_point <- floor(0.80 * n_obs)
-
-train_var <- data_var_trans[1:split_point, ]
-test_var  <- data_var_trans[(split_point + 1):n_obs, ]
-
-print(paste("Training set:", nrow(train_var), "osservazioni"))
-print(paste("Test set:", nrow(test_var), "osservazioni"))
-
-# Selezione Lag Ottimale (BIC)
-lag_selection <- VARselect(train_var, lag.max = 8, type = "const") # lag.max ridotto per sicurezza
-optimal_p <- lag_selection$selection["SC(n)"]
-print(paste("Lag ottimale selezionato (BIC):", optimal_p))
-
-# Stima VAR
-var_model <- VAR(train_var, p = optimal_p, type = "const")
-
-# Diagnostica
-print("Test Autocorrelazione Residui:")
-print(serial.test(var_model, lags.pt = 12, type = "PT.asymptotic"))
-```
-```{r}
 library(forecast)
 library(tidyverse)
 
-#-----------------------------------------------
+# --------------------------------------------------
 # 1) CREATE TRAIN - TEST SPLIT
-#-----------------------------------------------
+# --------------------------------------------------
 
-# assume che il dataset abbia già:
-# data_filtered$UMCSENT  (serie originale)
-# data_filtered$X1 ... Xk (le 6 variabili aggiuntive)
-
-ts_data <- ts(data_filtered$UMCSENT, frequency = 12, start = c(1978,1))
+# Convertiamo la serie principale in ts mensile
+ts_data <- ts(data_all$Sentiment, frequency = 12, start = c(1978,1))
 
 # 80% train, 20% test
 train_length <- floor(0.8 * length(ts_data))
+
 train <- window(ts_data, end = c(1978 + (train_length-1)/12))
 test  <- window(ts_data, start = c(1978 + (train_length)/12))
 
-# Regressors (le tue variabili esterne)
-X <- as.matrix(data_filtered[, c("X1","X2","X3","X4","X5","X6")])
+# --------------------------------------------------
+# 2) PREPARAZIONE DELLE VARIABILI ESTERNE (ARIMAX)
+# --------------------------------------------------
 
+# Selezioniamo le regressori (tutte tranne Sentiment)
+X <- as.matrix(data_all[, c("Oil",
+                            "Income",
+                            "CPI",
+                            "Unemployment",
+                            "IndProd",
+                            "FedFunds")])
+
+# Allineiamo train e test
 train_X <- X[1:train_length, ]
 test_X  <- X[(train_length+1):nrow(X), ]
 
-#-----------------------------------------------
-# 2) FIT ARIMA
-#-----------------------------------------------
+# --------------------------------------------------
+# 3) FIT DEL MODELLO ARIMA (SENZA REGRESSORI)
+# --------------------------------------------------
 model_arima <- auto.arima(train)
 
-#-----------------------------------------------
-# 3) FIT ARIMAX
-#-----------------------------------------------
+# --------------------------------------------------
+# 4) FIT DEL MODELLO ARIMAX
+# --------------------------------------------------
 model_arimax <- auto.arima(train, xreg = train_X)
 
-#-----------------------------------------------
-# 4) FORECAST
-#-----------------------------------------------
-fc_arima <- forecast(model_arima, h = length(test))
+# --------------------------------------------------
+# 5) FORECAST
+# --------------------------------------------------
+fc_arima  <- forecast(model_arima, h = length(test))
 fc_arimax <- forecast(model_arimax, xreg = test_X, h = length(test))
 
-#-----------------------------------------------
-# 5) ERROR METRICS (RMSE, MAE, MAPE)
-#-----------------------------------------------
+# --------------------------------------------------
+# 6) METRICHE DI ERRORE
+# --------------------------------------------------
 
 rmse <- function(a,b) sqrt(mean((a-b)^2))
 mae  <- function(a,b) mean(abs(a-b))
@@ -199,9 +122,9 @@ results <- data.frame(
 
 print(results)
 
-#-----------------------------------------------
-# 6) PLOT: COMPARAZIONE DEI DUE MODELLI
-#-----------------------------------------------
+# --------------------------------------------------
+# 7) PLOT DEL CONFRONTO
+# --------------------------------------------------
 
 df_plot <- data.frame(
   Date   = time(test),
@@ -221,8 +144,6 @@ ggplot(df_plot_long, aes(Date, Value, color = Series)) +
        y = "Value",
        x = "Time") +
   theme_minimal()
-
-```
 
 ```{r}
 
