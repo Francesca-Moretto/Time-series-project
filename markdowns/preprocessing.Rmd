@@ -118,7 +118,7 @@ This test works with the opposite hypotheses compared to the ADF test.
 
 -   **Conclusion:** Since the p-value is lower than the standard threshold of 0.05 (5%), **reject** $H_0$. According to this test, the series is **not stationary**.
 
-## 6. Autocorrelation
+## 6. ACF and PACF
 
 ```{r}
 # ACF and PACF
@@ -171,46 +171,7 @@ kpss.test(diff_log)
 
 -   **Conclusion:** Since the p-value is greater than 0.05, **fail to reject** $H_0$. The evidence supports the conclusion that the series is **stationary**.
 
-
-
-
-
-```{r}
-# Library required for autoplot of roots
-library(forecast)
-library(ggplot2)
-library(gridExtra) # To arrange plots side by side if installed, otherwise plot sequentially
-
-# --- 1. Fit AR Models ---
-# We fit an AR(2) model to both series to see where the roots lie.
-# We force d=0 because we want to see the properties of the raw data vs the manually differenced data.
-
-# Model on Level Data (Log UMCSENT)
-model_level_check <- Arima(data_filtered$log_UMCSENT, order = c(2, 0, 0))
-
-# Model on Differenced Data
-# We use na.omit because the first observation of the difference is NA
-model_diff_check <- Arima(na.omit(data_filtered$diff_log_UMCSENT), order = c(2, 0, 0))
-
-# --- 2. Plotting ---
-
-# Plot A: Level Data
-p1 <- autoplot(model_level_check) +
-  labs(title = "Inverse AR Roots: Level Data",
-       subtitle = "Log(UMCSENT) - Roots close to Unit Circle indicate Non-Stationarity")
-
-# Plot B: Differenced Data
-p2 <- autoplot(model_diff_check) +
-  labs(title = "Inverse AR Roots: Differenced Data",
-       subtitle = "First Diff - Roots inside Unit Circle indicate Stationarity")
-
-# Display plots
-print(p1)
-print(p2)
-```
-
-
-### 7.2 ACF and PACF
+### 7.2 ACF and PACF - Differenced Data
 
 ```{r}
 
@@ -245,7 +206,7 @@ print(pacf_table)
 
 ```
 
-### 1. General Interpretation
+**1. General Interpretation**
 
 The most striking feature of both tables is that **Lag 1 is statistically insignificant** (approx 0.03), while **Lag 2 is significant** (approx -0.17).
 
@@ -255,84 +216,21 @@ The most striking feature of both tables is that **Lag 1 is statistically insign
 
 Because the ACF and PACF look somewhat similar (both have a spike at Lag 2 and are otherwise quiet), it indicates a process that can be modeled effectively by either pure AR or pure MA terms, provided they reach the second lag.
 
-### 2. Best Possible Models (Candidates)
+**2. Best Possible Models (Candidates)**
 
 Based on the standard identification rules (Box-Jenkins methodology), here are the top candidates:
 
-#### **Candidate A: ARIMA(0, 1, 2)**
+**Candidate A: ARIMA(0, 1, 2)**
 
 -   **Why?** This relies on the **ACF** interpretation. The ACF shows significant activity up to Lag 2 and then largely cuts off (ignoring the minor Lag 5 noise). This suggests a Moving Average (MA) process of order $q=2$.
 
 -   **Note:** Since Lag 1 is insignificant, the model will likely estimate a very small coefficient for the first MA term ($ma1 \approx 0$) and a significant one for the second ($ma2 \approx -0.17$).
 
-#### **Candidate B: ARIMA(2, 1, 0)**
+**Candidate B: ARIMA(2, 1, 0)**
 
 -   **Why?** This relies on the **PACF** interpretation. The PACF shows significant activity at Lag 2 and then mostly cuts off (again, barring the Lag 5 spike). This suggests an AutoRegressive (AR) process of order $p=2$.
 
 -   **Note:** Similar to the model above, this would likely result in a model where the $ar1$ coefficient is near zero, but $ar2$ is significant.
-
-
-## 7.3 Model Selection (AIC/BIC Comparison)
-
-
-```{r}
-
-library(tidyr) # Necessaria per riorganizzare i dati per il grafico
-
-# 1. Inizializzazione del dataframe per i risultati
-results <- data.frame(Order = integer(),
-                      Type = character(),
-                      AIC = numeric(),
-                      BIC = numeric())
-
-# 2. Calcolo dei modelli AR e MA da ordine 1 a 12
-# Usiamo il dataset log_UMCSENT e impostiamo d=1 (differenza prima) nel comando Arima
-
-for (i in 1:12) {
-  
-  # Modello AR(i): ARIMA(i, 1, 0)
-  try({
-    fit_ar <- Arima(data_filtered$log_UMCSENT, order = c(i, 1, 0))
-    results <- rbind(results, data.frame(Order = i, Type = "AR Model", AIC = fit_ar$aic, BIC = fit_ar$bic))
-  }, silent = TRUE)
-  
-  # Modello MA(i): ARIMA(0, 1, i)
-  try({
-    fit_ma <- Arima(data_filtered$log_UMCSENT, order = c(0, 1, i))
-    results <- rbind(results, data.frame(Order = i, Type = "MA Model", AIC = fit_ma$aic, BIC = fit_ma$bic))
-  }, silent = TRUE)
-}
-
-# 3. Ristrutturazione dei dati (Pivot Long)
-# Trasformiamo le colonne AIC e BIC in una sola colonna "Metric" per poterle plottare come linee diverse
-results_long <- pivot_longer(results, cols = c("AIC", "BIC"), names_to = "Metric", values_to = "Value")
-
-# 4. Creazione del Grafico
-ggplot(results_long, aes(x = Order, y = Value, color = Metric, group = Metric)) +
-  geom_line(size = 1) +
-  geom_point(size = 2) +
-  # facet_wrap divide il grafico in due pannelli: uno per AR e uno per MA
-  facet_wrap(~ Type, scales = "free_y") + 
-  scale_x_continuous(breaks = 1:12) +
-  labs(title = "AIC & BIC Comparison by Model Order",
-       subtitle = "Left: AR(p) models | Right: MA(q) models",
-       x = "Order (p or q)",
-       y = "Information Criterion Value",
-       color = "Metric") +
-  theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    strip.text = element_text(size = 12, face = "bold") # Formattazione dei titoli dei pannelli
-  )
-
-# Stampa dei valori minimi per controllo numerico
-cat("Lowest AIC found:\n")
-print(results[which.min(results$AIC), ])
-cat("\nLowest BIC found:\n")
-print(results[which.min(results$BIC), ])
-```
-
-
 
 ## 8. Training and Test sets
 
@@ -348,62 +246,70 @@ test <- subset(data_filtered, 1:nrows > index_division)
 cat("Training:", nrow(train), "rows\n")
 cat("Test:", nrow(test), "rows\n")
 ```
+
+## 9. ACF and PACF - Train Set
+
+```{r}
+
+par(mfrow=c(1,2))
+
+# ACF plot - train set
+acf(train$diff_log_UMCSENT, na.action = na.pass, main="ACF - Training Data")
+
+# PACF plot - train set
+pacf(train$diff_log_UMCSENT, na.action = na.pass, main="PACF - Training Data")
+
+par(mfrow=c(1,1))
+
+```
+
+## 10. Model Selection (AIC/BIC Comparison)
+
 ```{r}
 
 library(tidyr) 
-library(forecast)
-library(ggplot2)
 
-# 1. Inizializzazione del dataframe per i risultati
 results <- data.frame(Order = integer(),
                       Type = character(),
                       AIC = numeric(),
                       BIC = numeric())
 
-# 2. Calcolo dei modelli AR e MA da ordine 1 a 12
-# *** MODIFICA: Usiamo train$log_UMCSENT invece di data_filtered ***
+# Models AR and MA of order 1 to 12
 
 for (i in 1:12) {
   
-  # Modello AR(i): ARIMA(i, 1, 0) calcolato su TRAIN
+  # Model AR(i): ARIMA(i, 1, 0)
   try({
     fit_ar <- Arima(train$log_UMCSENT, order = c(i, 1, 0))
     results <- rbind(results, data.frame(Order = i, Type = "AR Model", AIC = fit_ar$aic, BIC = fit_ar$bic))
   }, silent = TRUE)
   
-  # Modello MA(i): ARIMA(0, 1, i) calcolato su TRAIN
+  # Model MA(i): ARIMA(0, 1, i)
   try({
     fit_ma <- Arima(train$log_UMCSENT, order = c(0, 1, i))
     results <- rbind(results, data.frame(Order = i, Type = "MA Model", AIC = fit_ma$aic, BIC = fit_ma$bic))
   }, silent = TRUE)
 }
 
-# 3. Ristrutturazione dei dati (Pivot Long)
 results_long <- pivot_longer(results, cols = c("AIC", "BIC"), names_to = "Metric", values_to = "Value")
 
-# 4. Creazione del Grafico
+# Plot
 ggplot(results_long, aes(x = Order, y = Value, color = Metric, group = Metric)) +
   geom_line(size = 1) +
   geom_point(size = 2) +
-  # facet_wrap divide il grafico in due pannelli: uno per AR e uno per MA
   facet_wrap(~ Type, scales = "free_y") + 
   scale_x_continuous(breaks = 1:12) +
-  labs(title = "AIC & BIC Comparison (Training Set)",
-       subtitle = "Model selection based on Training Data only",
+  labs(title = "AIC & BIC Comparison by Model Order",
+       subtitle = "AR(p) models and MA(q) models",
        x = "Order (p or q)",
        y = "Information Criterion Value",
        color = "Metric") +
   theme_minimal() +
   theme(
     legend.position = "bottom",
-    strip.text = element_text(size = 12, face = "bold") 
+    strip.text = element_text(size = 12, face = "bold")
   )
 
-# Stampa dei valori minimi per controllo numerico
-cat("Lowest AIC found (on Train):\n")
-print(results[which.min(results$AIC), ])
-cat("\nLowest BIC found (on Train):\n")
-print(results[which.min(results$BIC), ])
 ```
 
 ```{r}
@@ -479,6 +385,7 @@ ggplot(grid_long, aes(x = factor(q), y = factor(p), fill = Value)) +
   theme_minimal() +
   theme(panel.grid = element_blank())
 ```
+
 ```{r}
 
 ## 9.2 Selected Mixed Models Comparison (Replicating the MATLAB Style Plot)
@@ -554,8 +461,6 @@ ggplot(results_long, aes(x = Model, y = Value, color = Metric, group = Metric)) 
   )
 
 ```
-
-
 
 ### ARIMA (2,1,3)
 
@@ -799,6 +704,7 @@ ggplot(comparison_results, aes(x = reorder(Model, RMSE), y = RMSE, fill = Model)
   theme_minimal() +
   theme(legend.position = "none")
 ```
+
 ```{r}
 
 best_auto_model <- auto.arima(train$log_UMCSENT, 
@@ -814,8 +720,6 @@ print(best_auto_model)
 auto_order <- arimaorder(best_auto_model)
 cat("Parameters found: p=", auto_order[1], " d=", auto_order[2], " q=", auto_order[3], "\n")
 ```
-
-
 
 ```{r}
 
@@ -856,6 +760,7 @@ if(best_model_name == "ARIMA(1,1,1)") final_model <- model_mixed
 
 checkresiduals(final_model)
 ```
+
 ```{r}
 
 # FORECAST 
@@ -963,6 +868,7 @@ ggplot() +
     legend.text = element_text(size = 11)
   )
 ```
+
 ```{r}
 
 # RESIDUALS
@@ -982,7 +888,40 @@ shapiro_res <- shapiro.test(residuals(final_best_fit))
 cat("\nNormality Test (Shapiro-Wilk) p-value:", shapiro_res$p.value, "\n")
 ```
 
+```{r}
 
+# AR ROOTS
+library(forecast)
+library(ggplot2)
+library(gridExtra)
+
+# --- 1. Fit AR Models ---
+# We fit an AR(2) model to both series to see where the roots lie.
+# We force d=0 because we want to see the properties of the raw data vs the manually differenced data.
+
+# Model on Level Data (Log UMCSENT)
+model_level_check <- Arima(data_filtered$log_UMCSENT, order = c(1, 0, 0))
+
+# Model on Differenced Data
+# We use na.omit because the first observation of the difference is NA
+model_diff_check <- Arima(na.omit(data_filtered$diff_log_UMCSENT), order = c(1, 0, 0))
+
+# --- 2. Plotting ---
+
+# Plot A: Level Data
+p1 <- autoplot(model_level_check) +
+  labs(title = "Inverse AR Roots: Level Data",
+       subtitle = "Log(UMCSENT) - Roots close to Unit Circle indicate Non-Stationarity")
+
+# Plot B: Differenced Data
+p2 <- autoplot(model_diff_check) +
+  labs(title = "Inverse AR Roots: Differenced Data",
+       subtitle = "First Diff - Roots inside Unit Circle indicate Stationarity")
+
+# Display plots
+print(p1)
+print(p2)
+```
 
 ```{r}
 # # CORRELATION TEST
