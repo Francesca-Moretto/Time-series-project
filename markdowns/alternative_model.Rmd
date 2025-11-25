@@ -4,332 +4,176 @@ output: html_document
 date: "2025-11-19"
 ---
 ```{r}
-library(xts)
 
-# --------------------------------------------------
-# 2. FUNZIONE SEMPLICE PER IMPORTARE CSV FRED
-# --------------------------------------------------
-
-read_fred <- function(filename, col_name) {
-  df <- read.csv(paste0("data/", filename), stringsAsFactors = FALSE)
-
-  # Assume che la colonna 1 sia la data e la colonna 2 il valore
-  df$Date <- as.Date(df[,1])
-  df$Value <- as.numeric(df[,2])
-
-  df <- na.omit(df)
-
-  xts_obj <- xts(df$Value, order.by = df$Date)
-  colnames(xts_obj) <- col_name
-
-  return(xts_obj)
-}
-
-# --------------------------------------------------
-# 3. CARICAMENTO DELLE SERIE
-# --------------------------------------------------
-
-UMCSENT <- read_fred("UMCSENT.csv",   "Sentiment")
-oil    <- read_fred("WTISPLC.csv",   "Oil")
-income <- read_fred("PI.csv",        "Income")
-cpi    <- read_fred("CPIAUCSL.csv",  "CPI")
-unrate <- read_fred("UNRATE.csv",    "Unemployment")
-ip     <- read_fred("INDPRO.csv",    "IndProd")
-fed    <- read_fred("FEDFUNDS.csv",  "FedFunds")
-
-# --------------------------------------------------
-# 4. UNIONE SEMPLICE DELLE SERIE (INTERSEZIONE DATE)
-# --------------------------------------------------
-
-data_all <- merge(UMCSENT, oil, income, cpi, unrate, ip, fed)
-data_all <- na.omit(data_all)
-
-# Filtra dal 1978
-data_all <- data_all[index(data_all) >= "1978-01-01"]
-
-# Risultato finale
-print("Variabili importate e unite correttamente:")
-print(colnames(data_all))
-
-head(data_all)
-```
-
-```{r}
-library(forecast)
-library(tidyverse)
-
-# --------------------------------------------------
-# 1) CREATE TRAIN - TEST SPLIT
-# --------------------------------------------------
-
-# Convertiamo la serie principale in ts mensile
-ts_data <- ts(data_all$Sentiment, frequency = 12, start = c(1978,1))
-
-# 80% train, 20% test
-train_length <- floor(0.8 * length(ts_data))
-
-train <- window(ts_data, end = c(1978 + (train_length-1)/12))
-test  <- window(ts_data, start = c(1978 + (train_length)/12))
-
-# --------------------------------------------------
-# 2) PREPARAZIONE DELLE VARIABILI ESTERNE (ARIMAX)
-# --------------------------------------------------
-
-# Selezioniamo le regressori (tutte tranne Sentiment)
-X <- as.matrix(data_all[, c("Oil",
-                            "Income",
-                            "CPI",
-                            "Unemployment",
-                            "IndProd",
-                            "FedFunds")])
-
-# Allineiamo train e test
-train_X <- X[1:train_length, ]
-test_X  <- X[(train_length+1):nrow(X), ]
-
-# --------------------------------------------------
-# 3) FIT DEL MODELLO ARIMA (SENZA REGRESSORI)
-# --------------------------------------------------
-model_arima <- auto.arima(train)
-
-# --------------------------------------------------
-# 4) FIT DEL MODELLO ARIMAX
-# --------------------------------------------------
-model_arimax <- auto.arima(train, xreg = train_X)
-
-# --------------------------------------------------
-# 5) FORECAST
-# --------------------------------------------------
-fc_arima  <- forecast(model_arima, h = length(test))
-fc_arimax <- forecast(model_arimax, xreg = test_X, h = length(test))
-
-# --------------------------------------------------
-# 6) METRICHE DI ERRORE
-# --------------------------------------------------
-
-rmse <- function(a,b) sqrt(mean((a-b)^2))
-mae  <- function(a,b) mean(abs(a-b))
-mape <- function(a,b) mean(abs((a-b)/a))*100
-
-results <- data.frame(
-  Model = c("ARIMA","ARIMAX"),
-  RMSE  = c(rmse(test, fc_arima$mean),
-            rmse(test, fc_arimax$mean)),
-  MAE   = c(mae(test, fc_arima$mean),
-            mae(test, fc_arimax$mean)),
-  MAPE  = c(mape(test, fc_arima$mean),
-            mape(test, fc_arimax$mean))
-)
-
-print(results)
-
-# --------------------------------------------------
-# 7) PLOT DEL CONFRONTO
-# --------------------------------------------------
-
-df_plot <- data.frame(
-  Date   = time(test),
-  Actual = as.numeric(test),
-  ARIMA  = as.numeric(fc_arima$mean),
-  ARIMAX = as.numeric(fc_arimax$mean)
-)
-
-df_plot_long <- df_plot %>%
-  pivot_longer(cols = c("Actual","ARIMA","ARIMAX"),
-               names_to = "Series",
-               values_to = "Value")
-
-ggplot(df_plot_long, aes(Date, Value, color = Series)) +
-  geom_line(size = 1.1) +
-  labs(title = "ARIMA vs ARIMAX — Forecast Comparison",
-       y = "Value",
-       x = "Time") +
-  theme_minimal()
-
-
-# --- BLOCCO UNICO CORRETTO E ROBUSTO ---
-
-# 1. LIBRERIE
-if(!require(vars)) install.packages("vars")
-if(!require(quantmod)) install.packages("quantmod")
-library(vars)
-library(tseries)
+# ==============================================================================
+# 1. LIBRERIE E CONFIGURAZIONE
+# ==============================================================================
 library(ggplot2)
-library(xts)
-library(quantmod)
+library(forecast)
+library(dplyr)
+library(lubridate)
+library(tseries)
 
-# Pulisce l'ambiente
-rm(list = ls()) 
+# ==============================================================================
+# 2. CARICAMENTO E PREPARAZIONE DATI
+# ==============================================================================
 
-# 2. FUNZIONE DI LETTURA CSV
-read_fred_csv <- function(filename, col_name) {
-  path <- paste0("data/", filename)
-  if (!file.exists(path)) {
-    warning(paste("FILE MANCANTE:", filename))
-    return(NULL)
-  }
-  # Legge CSV ignorando stringhe come fattori
-  df <- read.csv(path, stringsAsFactors = FALSE)
-  
-  # Prende 1^ colonna (Data) e 2^ colonna (Valore) per indice
-  dates <- as.Date(df[, 1], tryFormats = c("%Y-%m-%d", "%d/%m/%Y"))
-  values <- as.numeric(df[, 2])
-  
-  # Crea xts rimuovendo NA
-  clean_df <- na.omit(data.frame(Date=dates, Value=values))
-  if(nrow(clean_df) == 0) return(NULL)
-  
-  ts_data <- xts(clean_df$Value, order.by = clean_df$Date)
-  colnames(ts_data) <- col_name
-  return(ts_data)
+# Funzione helper per caricare e formattare la data
+load_and_prep <- function(filename) {
+  df <- read.csv(filename)
+  # Conversione data
+  df$observation_date <- as.Date(df$observation_date, format = "%Y-%m-%d")
+  return(df)
 }
 
-# 3. CARICAMENTO E TRASFORMAZIONE IMMEDIATA
-print("--- Caricamento e Trasformazione ---")
+# Caricamento dei file (Assicurati che siano nella working directory)
+df_sent <- load_and_prep("data/UMCSENT.csv")
+df_oil  <- load_and_prep("data/WTISPLC.csv")
+df_pi   <- load_and_prep("data/PI.csv")
+df_cpi  <- load_and_prep("data/CPIAUCSL.csv")
+df_un   <- load_and_prep("data/UNRATE.csv")
+df_ind  <- load_and_prep("data/INDPRO.csv")
+df_fed  <- load_and_prep("data/FEDFUNDS.csv")
 
-# Funzioni helper per trasformare
-get_diff_log <- function(x) { if(!is.null(x)) diff(log(x)) else NULL }
-get_diff     <- function(x) { if(!is.null(x)) diff(x) else NULL }
+# Unione dei dataset in un unico dataframe usando la data
+list_dfs <- list(df_sent, df_oil, df_pi, df_cpi, df_un, df_ind, df_fed)
+full_data <- Reduce(function(x, y) merge(x, y, by = "observation_date", all = FALSE), list_dfs)
 
-# -- TARGET (UMCSENT) --
-ts_raw_sent <- read_fred_csv("UMCSENT.csv", "Sentiment")
-if(is.null(ts_raw_sent)) stop("ERRORE BLOCCANTE: Manca 'UMCSENT.csv' nella cartella data/.")
-ts_sent <- get_diff_log(ts_raw_sent)
-colnames(ts_sent) <- "d_log_Sent"
+# Filtro temporale (dal 1978 come da analisi precedente)
+data_filtered <- subset(full_data, observation_date >= "1978-01-01")
+data_filtered <- na.omit(data_filtered)
 
-# -- ESPLICATIVE --
-# Petrolio (WTISPLC) -> Log-Diff
-ts_raw_oil <- read_fred_csv("WTISPLC.csv", "Oil")
-ts_oil <- get_diff_log(ts_raw_oil)
-if(!is.null(ts_oil)) colnames(ts_oil) <- "d_log_Oil"
+# ==============================================================================
+# 3. TRASFORMAZIONI VARIABILI (LOG E DIFFERENZE PER REGRESSORI)
+# ==============================================================================
 
-# Reddito (PI) -> Log-Diff
-ts_raw_inc <- read_fred_csv("PI.csv", "Income")
-ts_inc <- get_diff_log(ts_raw_inc)
-if(!is.null(ts_inc)) colnames(ts_inc) <- "d_log_Inc"
+# -- VARIABILE TARGET (LIVELLO) --
+# Usiamo il Log-Livello. Non differenziamo Y qui, lo farà il modello se serve.
+data_filtered$ln_UMCSENT <- log(data_filtered$UMCSENT)
 
-# Inflazione (CPIAUCSL) -> Log-Diff
-ts_raw_cpi <- read_fred_csv("CPIAUCSL.csv", "CPI")
-ts_cpi <- get_diff_log(ts_raw_cpi)
-if(!is.null(ts_cpi)) colnames(ts_cpi) <- "d_log_CPI"
+# -- REGRESSORI (MACROECONOMIC VARIABLES) --
+# Trasformiamo i regressori in Log
+data_filtered$ln_Oil     <- log(data_filtered$WTISPLC)
+data_filtered$ln_Income  <- log(data_filtered$PI)
+data_filtered$ln_CPI     <- log(data_filtered$CPIAUCSL)
+data_filtered$ln_IndPro  <- log(data_filtered$INDPRO)
 
-# Disoccupazione (UNRATE) -> Diff (Variazione assoluta)
-ts_raw_unrate <- read_fred_csv("UNRATE.csv", "Unrate")
-ts_unrate <- get_diff(ts_raw_unrate)
-if(!is.null(ts_unrate)) colnames(ts_unrate) <- "d_Unrate"
+# Calcoliamo le differenze per i regressori (Growth Rates / Shocks)
+# Usiamo le variazioni delle macro-variabili per spiegare il livello del sentiment
+d_Oil     <- c(NA, diff(data_filtered$ln_Oil))
+d_Income  <- c(NA, diff(data_filtered$ln_Income))
+d_CPI     <- c(NA, diff(data_filtered$ln_CPI))       
+d_IndPro  <- c(NA, diff(data_filtered$ln_IndPro))
+d_Unrate  <- c(NA, diff(data_filtered$UNRATE))   # Variazione tasso disoccupazione
+d_FedFunds<- c(NA, diff(data_filtered$FEDFUNDS)) # Variazione tassi interesse
 
-# Produzione Industriale (INDPRO) -> Log-Diff
-ts_raw_ip <- read_fred_csv("INDPRO.csv", "IndPro")
-ts_ip <- get_diff_log(ts_raw_ip)
-if(!is.null(ts_ip)) colnames(ts_ip) <- "d_log_IP"
+# Aggiungiamo le differenze al dataframe temporaneo
+# (Nota: la prima riga sarà NA)
+data_filtered$d_Oil <- d_Oil
+data_filtered$d_Income <- d_Income
+data_filtered$d_CPI <- d_CPI
+data_filtered$d_IndPro <- d_IndPro
+data_filtered$d_Unrate <- d_Unrate
+data_filtered$d_FedFunds <- d_FedFunds
 
-# Tassi Fed (FEDFUNDS) -> Diff
-ts_raw_fed <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
-ts_fed <- get_diff(ts_raw_fed)
-if(!is.null(ts_fed)) colnames(ts_fed) <- "d_FedFunds"
+# Rimuoviamo la prima riga con NA generati dalle differenze
+model_data <- na.omit(data_filtered)
 
-# S&P 500 (Yahoo) -> Log-Diff
-ts_stock <- NULL
-tryCatch({
-  getSymbols("^GSPC", src = "yahoo", from = "1978-01-01", auto.assign = TRUE)
-  ts_stock_raw <- to.monthly(GSPC[,6], indexAt = "firstof", OHLC = FALSE)
-  ts_stock <- diff(log(ts_stock_raw))
-  colnames(ts_stock) <- "d_log_Stock"
-  print("S&P 500 scaricato e trasformato.")
-}, error = function(e) { print("S&P 500 non disponibile.") })
+# ==============================================================================
+# 4. CREAZIONE STRUTTURA LAGGED (PER PREVISIONE EX-ANTE)
+# ==============================================================================
+# Obiettivo: Prevedere Y(t) usando X(t-1).
+# Questo ci permette di fare previsioni reali per il mese successivo.
 
-# 4. UNIONE DATASET FINALE
-list_vars <- list(ts_sent, ts_oil, ts_inc, ts_cpi, ts_unrate, ts_ip, ts_fed, ts_stock)
-# Rimuovi elementi NULL
-list_vars <- list_vars[!sapply(list_vars, is.null)]
-
-# Merge (Intersezione date)
-data_var_trans <- do.call(merge, list_vars)
-data_var_trans <- na.omit(data_var_trans)
-data_var_trans <- data_var_trans[index(data_var_trans) >= "1978-01-01"]
-
-print(paste("Variabili nel modello:", paste(colnames(data_var_trans), collapse=", ")))
-print(paste("Numero osservazioni totali:", nrow(data_var_trans)))
-
-# 5. SPLIT E MODELLO VAR
-n_obs <- nrow(data_var_trans)
-split_point <- floor(0.80 * n_obs)
-train_var <- data_var_trans[1:split_point, ]
-test_var  <- data_var_trans[(split_point + 1):n_obs, ]
-
-# Selezione Lag
-lag_selection <- VARselect(train_var, lag.max = 8, type = "const")
-optimal_p <- lag_selection$selection["SC(n)"]
-print(paste("Lag ottimale (BIC):", optimal_p))
-
-# 6. ROLLING FORECAST
-print("--- Avvio Rolling Forecast ---")
-h_steps <- nrow(test_var)
-rolling_preds_var <- numeric(h_steps)
-data_mat <- as.matrix(data_var_trans)
-n_train <- nrow(train_var)
-
-# Identifica indice colonna target
-target_col <- "d_log_Sent"
-target_idx <- which(colnames(data_mat) == target_col)
-
-if(length(target_idx) == 0) stop("ERRORE: Colonna target persa nel merge. Controlla i dati.")
-
-for (i in 1:h_steps) {
-  # Finestra espandibile
-  train_subset <- data_mat[1:(n_train + i - 1), , drop = FALSE]
-  
-  tryCatch({
-    # Stima
-    curr_var <- VAR(train_subset, p = optimal_p, type = "const")
-    # Previsione
-    fc <- predict(curr_var, n.ahead = 1)
-    # Estrazione valore
-    rolling_preds_var[i] <- fc$fcst[[target_col]][1, "fcst"]
-  }, error = function(e) {
-    # Fallback Naive (ultimo valore osservato)
-    rolling_preds_var[i] <- train_subset[nrow(train_subset), target_idx]
-  })
+# Funzione lag
+lag_x <- function(x, k=1) {
+  c(rep(NA, k), x[1:(length(x)-k)])
 }
 
-# 7. VALUTAZIONE
-actual_values <- test_var[, target_idx]
-errors_var <- actual_values - rolling_preds_var
-
-rmse_var <- sqrt(mean(errors_var^2))
-mae_var <- mean(abs(errors_var))
-
-# Se hai i valori del benchmark in memoria usali, altrimenti NA
-if(!exists("rmse_rw")) rmse_rw <- NA 
-if(!exists("mae_rw")) mae_rw <- NA
-
-results_table <- data.frame(
-  Model = c("Benchmark (RW)", "VAR (Multivariato)"),
-  RMSE = c(rmse_rw, rmse_var),
-  MAE = c(mae_rw, mae_var)
+# Creiamo la matrice dei regressori RITARDATI di 1 mese
+X_matrix <- cbind(
+  Oil_lag      = lag_x(model_data$d_Oil),
+  Income_lag   = lag_x(model_data$d_Income),
+  CPI_lag      = lag_x(model_data$d_CPI),
+  Unrate_lag   = lag_x(model_data$d_Unrate),
+  IndPro_lag   = lag_x(model_data$d_IndPro),
+  FedFunds_lag = lag_x(model_data$d_FedFunds)
 )
 
-print("--- RISULTATI FINALI ---")
-print(results_table)
-
-# 8. GRAFICO
-df_plot <- data.frame(
-  Time = index(test_var),
-  Reale = as.numeric(actual_values),
-  Previsione = rolling_preds_var
+# Creiamo il dataset finale per il modello
+dataset_final <- data.frame(
+  Date = model_data$observation_date,
+  Y_Level = model_data$ln_UMCSENT,  # <--- QUI USIAMO IL LIVELLO (LOG), NON LA DIFFERENZA
+  X_matrix
 )
 
-ggplot(df_plot, aes(x = Time)) +
-  geom_line(aes(y = Reale, color = "Dato Reale"), size = 1) +
-  geom_line(aes(y = Previsione, color = "VAR Forecast"), linetype = "dashed", size = 0.8) +
-  labs(title = "Forecast Sentiment: VAR vs Realtà", 
-       y = "Diff-Log Sentiment", x = "Anno") +
-  scale_color_manual(values = c("Dato Reale" = "black", "VAR Forecast" = "red")) +
-  theme_minimal()
+# Rimuoviamo la riga NA creata dal lag
+dataset_final <- na.omit(dataset_final)
+
+# ==============================================================================
+# 5. SPLIT TRAIN / TEST
+# ==============================================================================
+
+# Convertiamo in oggetti Time Series
+Y_ts <- ts(dataset_final$Y_Level, frequency = 12)
+X_reg <- as.matrix(dataset_final[, -c(1, 2)]) # Escludiamo Date e Y
+
+# Divisione 80/20
+n <- length(Y_ts)
+n_train <- floor(0.80 * n)
+
+train_Y <- subset(Y_ts, end = n_train)
+test_Y  <- subset(Y_ts, start = n_train + 1)
+
+train_X <- X_reg[1:n_train, ]
+test_X  <- X_reg[(n_train + 1):n, ]
+
+cat("Training set:", length(train_Y), "mesi\n")
+cat("Test set:", length(test_Y), "mesi\n")
+
+# ==============================================================================
+# 6. STIMA DEL MODELLO (ARIMAX SU LIVELLI)
+# ==============================================================================
+
+# auto.arima su Y (Livello).
+# Se Y non è stazionaria, auto.arima imposterà d=1 automaticamente.
+# Interpretazione: Delta(Y) = Beta * X_lag + ARMA_errors
+fit_level <- auto.arima(train_Y, xreg = train_X, 
+                        seasonal = FALSE, 
+                        stepwise = FALSE, 
+                        approximation = FALSE)
+
+print(summary(fit_level))
+# Controlla il parametro "d" nell'output (es. ARIMA(p,1,q))
+
+# Analisi residui
+checkresiduals(fit_level)
+
+# ==============================================================================
+# 7. PREVISIONE E GRAFICO
+# ==============================================================================
+
+# Previsione usando i regressori del test set (che sono dati t-1 noti)
+forecast_level <- forecast(fit_level, xreg = test_X)
+
+# Grafico
+# Questo grafico mostrerà il TREND del Log-Sentiment, non solo le variazioni
+autoplot(forecast_level) +
+  autolayer(test_Y, series = "Dati Reali (Test)") +
+  labs(title = "Previsione Livello Sentiment (Log) con Regressori Macro",
+       y = "Log(UMCSENT)",
+       x = "Tempo") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Calcolo accuratezza
+print(accuracy(forecast_level, test_Y))
+
+# (Opzionale) Se vuoi vedere il grafico nella scala originale (non logaritmica):
+fc_original <- exp(forecast_level$mean)
+plot(fc_original, main="Previsione Scala Originale (Index Points)")
+
+
+
 ```
-
-
-
-
-
 
