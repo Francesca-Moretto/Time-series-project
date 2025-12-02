@@ -4,211 +4,376 @@ output: html_document
 date: "2025-11-19"
 ---
 
+# VAR Model
+
+## 1. Data Import
+
+```{r}
+data_unrate <- read.csv("data/UNRATE.csv") 
+
+data_unrate$observation_date <- as.Date(data_unrate$observation_date, format = "%Y-%m-%d")
+
+# Align Dates
+data_unrate_filtered <- subset(data_unrate, observation_date >= "1978-01-01")
+
+cat("Righe UMCSENT:", nrow(data_filtered), "\n")
+cat("Righe UNRATE:", nrow(data_unrate_filtered), "\n")
+
+# Merge based on date
+data_multivariate <- merge(data_filtered, data_unrate_filtered, by = "observation_date")
+
+str(data_multivariate)
+
+# Comparison plot
+ggplot(data_multivariate, aes(x = observation_date)) +
+  geom_line(aes(y = scale(UMCSENT), color = "Sentiment (Scaled)")) +
+  geom_line(aes(y = scale(UNRATE), color = "Unemployment (Scaled)")) +
+  labs(title = "Sentiment vs Unemployment",
+       x = "Year",
+       y = "Scaled Values",
+       color = "") +
+  theme_minimal()
+```
+
+## 2. Stationarity Test on Unemployment Rate
+
 ```{r}
 
-# ==============================================================
-# Forecasting pipeline: read FRED csv -> transform -> VAR rolling
-# ==============================================================
+# Original Series
 
-# 0. librerie (installano se mancanti)
-packages <- c("xts","zoo","vars","forecast","quantmod","ggplot2")
-to_install <- packages[!packages %in% installed.packages()[,"Package"]]
-if(length(to_install)) install.packages(to_install, dependencies = TRUE)
-library(xts); library(zoo); library(vars); library(forecast)
-library(quantmod); library(ggplot2)
+# Plot
+ggplot(data_multivariate, aes(x = observation_date, y = UNRATE)) +
+  geom_line() +
+  labs(title = 'Unemployment Rate (Originale)')
 
-# 1. funzione robusta per leggere CSV di FRED (data/, colonna1=date, col2=value)
-read_fred_csv <- function(filename, col_name) {
-  path <- file.path("data", filename)
-  if(!file.exists(path)) {
-    warning("File mancante: ", path)
-    return(NULL)
-  }
-  df <- read.csv(path, stringsAsFactors = FALSE)
-  # supporto formati data comuni
-  dates <- as.Date(df[,1], tryFormats = c("%Y-%m-%d","%d/%m/%Y","%Y/%m/%d"))
-  values <- as.numeric(df[,2])
-  clean <- na.omit(data.frame(Date = dates, Value = values))
-  if(nrow(clean) == 0) return(NULL)
-  xts_obj <- xts(clean$Value, order.by = clean$Date)
-  colnames(xts_obj) <- col_name
-  return(xts_obj)
-}
+# Stationarity Test
+cat("--- Test on UNRATE (Level) ---\n")
 
-# 2. carica le serie (sostituisci i nomi file se diversi)
-UMCSENT <- read_fred_csv("UMCSENT.csv", "Sentiment")
-WTISPLC  <- read_fred_csv("WTISPLC.csv", "Oil")
-PI       <- read_fred_csv("PI.csv", "Income")
-CPIAUCSL <- read_fred_csv("CPIAUCSL.csv", "CPI")
-UNRATE   <- read_fred_csv("UNRATE.csv", "Unrate")
-INDPRO   <- read_fred_csv("INDPRO.csv", "IndPro")
-FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
+# ADF (H0: Non-stationary)
+summary(ur.df(data_multivariate$UNRATE, type = "drift"))
 
-# controlla che la serie target esista
-if(is.null(UMCSENT)) stop("Errore: manca UMCSENT.csv in data/")
-
-# 3. Trasformazioni (log-diff per la maggior parte, diff per alcune serie)
-#    - target: diff(log(UMCSENT)) -> d_log_Sent
-#    - Oil, Income, CPI, IndPro -> diff(log)
-#    - Unrate, FedFunds -> simple diff (variazione)
-transform_for_model <- function(xts_obj, method = c("dlog","diff")) {
-  method <- match.arg(method)
-  if(is.null(xts_obj)) return(NULL)
-  if(method == "dlog") {
-    if(any(coredata(xts_obj) <= 0, na.rm = TRUE)) {
-      # se valori non positivi -> log non possibile, usa diff raw come fallback
-      res <- diff(xts_obj)
-    } else {
-      res <- diff(log(xts_obj))
-    }
-  } else {
-    res <- diff(xts_obj)
-  }
-  return(res)
-}
-
-d_log_sent <- transform_for_model(UMCSENT, "dlog")
-d_log_oil  <- transform_for_model(WTISPLC, "dlog")
-d_log_inc  <- transform_for_model(PI, "dlog")
-d_log_cpi  <- transform_for_model(CPIAUCSL, "dlog")
-d_unrate   <- transform_for_model(UNRATE, "diff")
-d_log_ip   <- transform_for_model(INDPRO, "dlog")
-d_fed      <- transform_for_model(FEDFUNDS, "diff")
-
-# opzionale: S&P500 (se vuoi scaricarlo; ignora se non vuoi dipendenza da internet)
-d_log_sp  <- NULL
-try({
-  getSymbols("^GSPC", src = "yahoo", from = "1978-01-01", auto.assign = TRUE, warnings = FALSE)
-  # prendiamo prezzo di chiusura (GSPC$GSPC.Close) e lo rendiamo mensile
-  gspc_monthly <- to.monthly(GSPC[,6], indexAt = "firstof", OHLC = FALSE)
-  d_log_sp <- diff(log(gspc_monthly))
-  colnames(d_log_sp) <- "d_log_Stock"
-}, silent = TRUE)
-
-# 4. merge delle serie - intersection (date comuni)
-list_series <- list(d_log_sent, d_log_oil, d_log_inc, d_log_cpi, d_unrate, d_log_ip, d_fed, d_log_sp)
-# keep only non-NULL
-list_series <- list_series[!sapply(list_series, is.null)]
-data_merged_xts <- do.call(merge, list_series)
-data_merged_xts <- na.omit(data_merged_xts)
-
-# filtra da 1978-01-01 in poi (se già lo è non cambia nulla)
-data_merged_xts <- data_merged_xts[index(data_merged_xts) >= "1978-01-01"]
-
-if(nrow(data_merged_xts) < 36) stop("Poche osservazioni dopo le trasformazioni: controlla i CSV e le trasformazioni.")
-
-cat("Variabili disponibili (dopo trasformazioni):", paste(colnames(data_merged_xts), collapse = ", "), "\n")
-cat("Numero osservazioni:", nrow(data_merged_xts), "\n")
-
-# mantieni copia con date per il plotting/test
-data_xts_full <- data_merged_xts
-
-# 5. converti in oggetto 'ts' mensile per VAR (start anno, mese, freq=12)
-first_date <- index(data_xts_full)[1]
-start_year <- as.integer(format(first_date, "%Y"))
-start_month <- as.integer(format(first_date, "%m"))
-data_ts <- ts(coredata(data_xts_full), start = c(start_year, start_month), frequency = 12)
-colnames(data_ts) <- colnames(data_xts_full)
-
-# 6. train/test split (80% train)
-n_total <- nrow(data_ts)
-n_train <- floor(0.8 * n_total)
-n_test  <- n_total - n_train
-train_ts <- window(data_ts, end = c(start_year + (n_train-1 + start_month -1)/12))
-test_ts  <- window(data_ts, start = time(data_ts)[n_train + 1])
-
-cat("Osservazioni train:", n_train, " test:", n_test, "\n")
-
-# 7. selezione lag ottimale (BIC/SC)
-lag_sel <- VARselect(train_ts, lag.max = 8, type = "const")
-optimal_p <- as.integer(lag_sel$selection["SC(n)"])  # BIC (SC)
-if(is.na(optimal_p) || length(optimal_p)==0) optimal_p <- lag_sel$selection[1]  # fallback
-cat("Lag selezionato (BIC / SC):", optimal_p, "\n")
-
-# 8. Rolling 1-step ahead forecast con VAR (expanding window)
-h_steps <- n_test
-target_name <- colnames(data_ts)[1]   # assumiamo target sia la prima colonna: "d_log_Sent"
-rolling_preds_var <- numeric(h_steps)
-rolling_preds_naive <- numeric(h_steps)  # benchmark: persistence (last observed value)
-
-# matrix di dati per slicing rapido
-data_mat <- as.matrix(data_ts)
-
-for(i in 1:h_steps) {
-  # finestra di training espandente
-  end_row <- n_train + i - 1
-  train_subset <- data_mat[1:end_row, , drop = FALSE]
-  # convertiamo a ts per VAR
-  # calcoliamo start e fine per la sottoserie
-  sub_start_time <- time(data_ts)[1]
-  sub_start <- c(start_year, start_month)
-  sub_ts <- ts(train_subset, start = sub_start, frequency = 12)
-  colnames(sub_ts) <- colnames(data_ts)
-  
-  # stima VAR e previsione 1-step
-  fc_val <- NA
-  try({
-    curr_var <- VAR(sub_ts, p = optimal_p, type = "const")
-    fc <- predict(curr_var, n.ahead = 1)
-    # predict returns list $fcst where each element named after variable
-    fc_val <- as.numeric(fc$fcst[[target_name]][1, "fcst"])
-  }, silent = TRUE)
-  
-  # fallback: se predict fallisce, uso ultimo valore osservato (persistenza)
-  if(is.na(fc_val)) {
-    fc_val <- train_subset[nrow(train_subset), which(colnames(data_mat) == target_name)]
-  }
-  rolling_preds_var[i] <- fc_val
-  
-  # naive persistence benchmark: last observed value in the expanding window
-  rolling_preds_naive[i] <- train_subset[nrow(train_subset), which(colnames(data_mat) == target_name)]
-}
-
-# 9. valutazione (confronto su test set)
-actual_vec <- as.numeric(test_ts[, target_name])
-if(length(actual_vec) != length(rolling_preds_var)) stop("Mismatch lunghezze test / predizioni")
-
-rmse <- function(a,b) sqrt(mean((a-b)^2))
-mae  <- function(a,b) mean(abs(a-b))
-
-rmse_var   <- rmse(actual_vec, rolling_preds_var)
-mae_var    <- mae(actual_vec, rolling_preds_var)
-rmse_naive <- rmse(actual_vec, rolling_preds_naive)
-mae_naive  <- mae(actual_vec, rolling_preds_naive)
-
-results <- data.frame(
-  Model = c("Naive Persistence","VAR (expanding rolling)"),
-  RMSE  = c(rmse_naive, round(rmse_var, 6)),
-  MAE   = c(round(mae_naive, 6), round(mae_var, 6))
-)
-print("=== Performance ===")
-print(results)
-
-# 10. grafico confronto: reale vs var forecast (date reali prese dall'xts)
-test_index_dates <- index(data_xts_full)[(n_train+1):n_total]
-df_plot <- data.frame(
-  Date = as.Date(test_index_dates),
-  Actual = actual_vec,
-  VAR_Forecast = rolling_preds_var,
-  Naive = rolling_preds_naive
-)
-
-library(tidyr)
-df_long <- pivot_longer(df_plot, cols = c("Actual","VAR_Forecast","Naive"),
-                        names_to = "Series", values_to = "Value")
-
-ggplot(df_long, aes(x = Date, y = Value, color = Series)) +
-  geom_line(size = 1) +
-  labs(title = paste("Forecast (target =", target_name, ")"),
-       subtitle = paste("VAR lag =", optimal_p, "| obs train:", n_train, "test:", n_test),
-       x = "Time", y = "Value (transformed)") +
-  theme_minimal()
-
-# 11. stampa breve sintesi
-cat("\nSummary:\n")
-cat("Target:", target_name, "\n")
-cat("Osservazioni totali:", n_total, " train:", n_train, " test:", n_test, "\n")
-cat("RMSE VAR:", round(rmse_var,6), " RMSE Naive:", round(rmse_naive,6), "\n")
+# KPSS (H0: Stationary)
+kpss.test(data_multivariate$UNRATE)
 
 ```
 
+```{r}
+
+# First Difference
+diff_unrate <- diff(data_multivariate$UNRATE)
+
+data_multivariate$diff_UNRATE <- c(NA, diff_unrate)
+
+# Plot
+ggplot(data_multivariate, aes(x = observation_date, y = diff_UNRATE)) +
+  geom_line() +
+  labs(title = 'First Difference of Unemployment Rate')
+
+# Stationarity Test on Differenced Data 
+cat("\n--- Test on diff_UNRATE (Differenced) ---\n")
+
+# ADF 
+summary(ur.df(na.omit(data_multivariate$diff_UNRATE), type = "drift"))
+
+# KPSS
+kpss.test(na.omit(data_multivariate$diff_UNRATE))
+```
+
+### 1. Test Augmented Dickey-Fuller (ADF)
+
+-   **Ipotesi Nulla (**$H_0$): La serie ha una radice unitaria (**NON** è stazionaria).
+
+-   **Risultato:** La statistica del test (`t value` su `z.lag.1` o `test-statistic`) è **-18.431**.
+
+-   **Confronto:** Questo valore è molto più negativo (a sinistra) del valore critico all'1% (**-3.43**).
+
+-   **Conclusione:** **Rifiutiamo** $H_0$. Abbiamo una fortissima evidenza statistica che la serie sia stazionaria.
+
+### 2. Test KPSS
+
+-   **Ipotesi Nulla (**$H_0$): La serie è **stazionaria** (Level Stationary).
+
+-   **Risultato:** Il p-value è **0.1** (con avvertimento che il valore reale è ancora più alto).
+
+-   **Conclusione:** Dato che il p-value è \> 0.05, **NON rifiutiamo** $H_0$. I dati supportano l'ipotesi che la serie sia stazionaria.
+
+### 3. ACF and PACF on Differenced Data
+
+```{r}
+# ACF and PACF on differenced data
+par(mfrow = c(1, 2)) 
+
+# ACF
+acf(na.omit(data_multivariate$diff_UNRATE), 
+    main = "ACF - Diff. Unemployment", 
+    lag.max = 36)
+
+# PACF
+pacf(na.omit(data_multivariate$diff_UNRATE), 
+     main = "PACF - Diff. Unemployment", 
+     lag.max = 36)
+
+par(mfrow = c(1, 1))
+```
+
+## 3. Data Split - Training and Test Set
+
+```{r}
+library(vars)
+library(ggplot2)
+
+var_cols <- c("diff_log_UMCSENT", "diff_UNRATE")
+var_data <- na.omit(data_multivariate[, var_cols])
+
+# Train/Test - 80%/20%
+n_obs <- nrow(var_data)
+split_point <- floor(0.80 * n_obs)
+
+train_var <- var_data[1:split_point, ]
+test_var <- var_data[(split_point + 1):n_obs, ]
+
+cat("Training Set:", nrow(train_var), "observations\n")
+cat("Test Set:    ", nrow(test_var), "observations\n")
+
+
+```
+
+## 4. AIC/BIC Comparison
+
+```{r}
+
+# Lag selection on training set
+lag_selection_train <- VARselect(train_var, lag.max = 12, type = "const")
+
+# Suggestions
+print(lag_selection_train$selection)
+
+# Plot AIC vs. BIC
+
+# criteria_df
+criteria_df <- data.frame(
+  Lag = 1:12, 
+  t(lag_selection_train$criteria)
+)
+
+df_plot <- data.frame(
+  Lag = rep(1:12, 2),
+  Value = c(criteria_df$AIC.n, criteria_df$SC.n),
+  Metric = c(rep("AIC (Prediction)", 12), rep("BIC (Simplicity)", 12))
+)
+
+# Plot
+ggplot(df_plot, aes(x = Lag, y = Value, color = Metric, group = Metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 1:12) +
+  labs(title = "Selezione Lag Ottimale (Calcolata su Training Set)",
+       subtitle = "Cerca il punto minimo. AIC per previsione, BIC per parsimonia.",
+       y = "Valore Criterio",
+       x = "Lag Order (p)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## 5. VAR Model
+
+```{r}
+
+# Model Estimation
+
+# 1. optimal p selection
+optimal_p <- 12 #lag_selection_train$selection["AIC(n)"]
+cat("The model is estimated with p =", optimal_p, "lag.\n")
+
+# 2. model estimation
+# type = "const" include una costante (intercetta), standard per dati differenziati
+# Se volessi un VARX (Unemployment esogena), la sintassi cambierebbe, 
+# ma qui trattiamo entrambe come endogene (si influenzano a vicenda).
+model_var <- VAR(train_var, p = optimal_p, type = "const")
+
+# 3. results
+summary(model_var)
+
+# 4. stability check (roots)
+roots_var <- roots(model_var)
+cat("\n--- Stability Check ---\n")
+if(all(roots_var < 1)){
+  cat("Stable (all roots < 1).\n")
+} else {
+  cat("ATTENTION: unstable. \n")
+}
+print(roots_var)
+```
+
+## 6. Residual Diagnostics
+
+```{r}
+# Residuals Diagnostics
+
+
+# A. Test di Correlazione Seriale (Portmanteau Test)
+# H0 (Null): Non c'è autocorrelazione nei residui (Il modello è BUONO)
+# H1 (Alt): C'è autocorrelazione (Il modello ha perso informazioni)
+# lags.pt = 16 è un valore standard per dati mensili (deve essere > p)
+serial_t <- serial.test(model_var, lags.pt = 16, type = "PT.asymptotic")
+print(serial_t)
+
+# Visualizzazione ACF dei residui
+# Se le barre escono dalle linee blu, c'è ancora correlazione
+plot(serial_t, names = "diff_log_UMCSENT") 
+
+
+# B. Test di Eteroschedasticità (ARCH Test)
+# H0: Varianza costante (Omoschedasticità) -> BUONO
+# H1: Varianza instabile (Eteroschedasticità) -> MALE
+arch_t <- arch.test(model_var, lags.multi = 12)
+print(arch_t)
+
+
+# C. Test di Normalità (Jarque-Bera)
+# H0: I residui sono normali -> BUONO
+# H1: I residui non sono normali -> MALE
+norm_t <- normality.test(model_var, multivariate.only = FALSE)
+# Visualizziamo solo la parte relativa alla variabile target UMCSENT
+print(norm_t$jb.uni)
+```
+
+## 7. Granger-Causality Check
+
+```{r}
+
+# 8. Test di Causalità di Granger
+
+# Test A: La disoccupazione (diff_UNRATE) causa il Sentiment?
+# H0: La disoccupazione NON causa Granger il Sentiment.
+# H1: La disoccupazione CAUSA Granger il Sentiment (Utile per la predizione).
+granger_from_unrate <- causality(model_var, cause = "diff_UNRATE")
+
+cat("--- TEST A: UNRATE aiuta a predire UMCSENT? ---\n")
+print(granger_from_unrate$Granger)
+
+
+# Test B: Il Sentiment (diff_log_UMCSENT) causa la Disoccupazione?
+# H0: Il Sentiment NON causa Granger la Disoccupazione.
+# H1: Il Sentiment CAUSA Granger la Disoccupazione.
+granger_from_sentiment <- causality(model_var, cause = "diff_log_UMCSENT")
+
+cat("\n--- TEST B: UMCSENT aiuta a predire UNRATE? ---\n")
+print(granger_from_sentiment$Granger)
+```
+
+## 8. Forecast
+
+```{r}
+
+# 9. Rolling Window Forecast (1-step ahead)
+
+# --- A. Impostazioni Iniziali ---
+# Dimensione della finestra (fissa) uguale alla lunghezza del training set originale
+window_size <- nrow(train_var) 
+total_obs <- nrow(var_data)
+test_start_index <- window_size + 1
+
+# Vettori per salvare i risultati
+forecasts_diff <- numeric() # Qui salviamo le differenze previste
+actuals_diff <- var_data$diff_log_UMCSENT[test_start_index:total_obs]
+
+cat("Avvio della Rolling Window Forecasting...\n")
+cat("Finestra di training:", window_size, "mesi.\n")
+cat("Previsioni da generare:", length(actuals_diff), "\n")
+
+# --- B. Il Ciclo Rolling (Loop) ---
+# Attenzione: questo ciclo può richiedere qualche secondo/minuto a seconda della velocità del PC
+for (i in 0:(length(actuals_diff) - 1)) {
+  
+  # 1. Definiamo la finestra corrente (scorrevole)
+  # Prende sempre 'window_size' osservazioni, spostandosi di 1 ogni volta
+  current_train_idx <- (1 + i):(window_size + i)
+  current_data <- var_data[current_train_idx, ]
+  
+  # 2. Ristimiamo il modello VAR sulla finestra corrente
+  # Usiamo lo stesso numero di lag (optimal_p) deciso prima
+  # tryCatch gestisce eventuali errori di convergenza (raro ma possibile)
+  fit_rolling <- tryCatch({
+    VAR(current_data, p = optimal_p, type = "const")
+  }, error = function(e) return(NULL))
+  
+  if (!is.null(fit_rolling)) {
+    # 3. Previsione 1 passo avanti (1-step ahead)
+    pred <- predict(fit_rolling, n.ahead = 1)
+    
+    # Estraiamo il valore puntuale della previsione per UMCSENT
+    fcst_value <- pred$fcst$diff_log_UMCSENT[1, "fcst"]
+    forecasts_diff <- c(forecasts_diff, fcst_value)
+  } else {
+    forecasts_diff <- c(forecasts_diff, NA) # Gestione errore
+  }
+}
+
+cat("Rolling Forecast completato.\n")
+
+# --- C. Ricostruzione dei Livelli (Inverse Transformation) ---
+# Il modello ha predetto la DIFFERENZA. Dobbiamo tornare al LOG LEVEL per confrontare.
+# Formula: Log_Price_Previsto(t) = Log_Price_Reale(t-1) + Diff_Prevista(t)
+
+# Recuperiamo i valori REALI in scala Log dal dataset originale (data_multivariate)
+# Indici corrispondenti al periodo di test
+test_indices_original <- (nrow(var_data) - length(actuals_diff) + 1):nrow(var_data)
+# Nota: +1 perché var_data partiva dalla riga 2 (causa diff)
+
+# Valori Log Reali (per confronto)
+actual_log_levels <- data_multivariate$log_UMCSENT[test_indices_original + 1] # +1 per allineamento diff
+# Valore precedente al primo punto del test (base di partenza)
+last_train_log_level <- data_multivariate$log_UMCSENT[test_indices_original[1]]
+
+# Ricostruzione Vettore Previsioni
+forecast_log_levels <- numeric(length(forecasts_diff))
+prev_value <- last_train_log_level
+
+# Per la rolling window 1-step, la base è sempre l'osservazione REALE precedente
+# (perché ogni mese conosciamo il dato vero del mese prima)
+actual_logs_shifted <- data_multivariate$log_UMCSENT[test_indices_original] # t-1
+forecast_log_levels <- actual_logs_shifted + forecasts_diff
+
+# --- D. Creazione Dataframe Finale per Confronto ---
+df_results <- data.frame(
+  Date = data_multivariate$observation_date[test_indices_original + 1],
+  Actual_Log = actual_log_levels,
+  Forecast_Log_VAR = forecast_log_levels,
+  Diff_Pred = forecasts_diff
+)
+
+head(df_results)
+```
+
+### Plot
+
+```{r}
+
+# --- Grafico: Actual vs Forecast ---
+ggplot(df_results, aes(x = Date)) +
+  geom_line(aes(y = Actual_Log, color = "Dati Reali"), size = 1) +
+  geom_line(aes(y = Forecast_Log_VAR, color = "VAR Forecast (Rolling)"), size = 0.8, linetype = "dashed") +
+  labs(title = "Previsione VAR vs Dati Reali (Log Scale)",
+       subtitle = paste("Rolling Window 1-step ahead | RMSE:", round(rmse_var, 4)),
+       y = "Log(Consumer Sentiment)",
+       color = "Legenda") +
+  theme_minimal() +
+  scale_color_manual(values = c("Dati Reali" = "black", "VAR Forecast (Rolling)" = "red"))
+```
+
+### RMSE
+
+```{r}
+# 10. Valutazione Performance
+
+# Calcolo Errori
+rmse_var <- sqrt(mean((df_results$Actual_Log - df_results$Forecast_Log_VAR)^2, na.rm = TRUE))
+mae_var <- mean(abs(df_results$Actual_Log - df_results$Forecast_Log_VAR), na.rm = TRUE)
+
+cat("--- Performance Modello VAR (Rolling Window) ---\n")
+cat("RMSE (Log Scale):", round(rmse_var, 4), "\n")
+cat("MAE  (Log Scale):", round(mae_var, 4), "\n")
+
+
+```
