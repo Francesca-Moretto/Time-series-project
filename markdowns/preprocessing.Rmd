@@ -268,6 +268,7 @@ par(mfrow=c(1,1))
 ```{r}
 
 library(tidyr) 
+library(forecast)
 
 results <- data.frame(Order = integer(),
                       Type = character(),
@@ -310,80 +311,6 @@ ggplot(results_long, aes(x = Order, y = Value, color = Metric, group = Metric)) 
     strip.text = element_text(size = 12, face = "bold")
   )
 
-```
-
-```{r}
-
-## 9.1 Grid Search: AIC/BIC Heatmap for Mixed Models
-
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-
-# 1. Impostazioni della griglia
-max_p <- 5  # Massimo ordine AR da testare
-max_q <- 5  # Massimo ordine MA da testare
-
-# Dataframe vuoto per salvare i risultati
-grid_results <- expand.grid(p = 0:max_p, q = 0:max_q)
-grid_results$AIC <- NA
-grid_results$BIC <- NA
-
-cat("Running Grid Search for ARIMA(p,1,q)... \n")
-
-# 2. Ciclo annidato (Nested Loop) per testare tutte le combinazioni
-# Nota: Usiamo try() perché alcune combinazioni complesse potrebbero dare errore
-for (i in 1:nrow(grid_results)) {
-  
-  p <- grid_results$p[i]
-  q <- grid_results$q[i]
-  
-  try({
-    # Addestriamo il modello sul Training Set
-    model <- Arima(train$log_UMCSENT, order = c(p, 1, q))
-    
-    grid_results$AIC[i] <- model$aic
-    grid_results$BIC[i] <- model$bic
-  }, silent = TRUE)
-  
-  # Barra di progresso testuale
-  if(i %% 5 == 0) cat(".")
-}
-cat("\nGrid Search Completed.\n")
-
-# 3. Preparazione dati per il grafico (Pivot Long)
-# Rimuoviamo righe dove il modello ha fallito (NA)
-grid_clean <- na.omit(grid_results)
-
-grid_long <- pivot_longer(grid_clean, cols = c("AIC", "BIC"), names_to = "Metric", values_to = "Value")
-
-# Troviamo i minimi per evidenziarli nel grafico
-min_vals <- grid_long %>%
-  group_by(Metric) %>%
-  slice(which.min(Value))
-
-# 4. Creazione della Heatmap
-ggplot(grid_long, aes(x = factor(q), y = factor(p), fill = Value)) +
-  geom_tile(color = "white") +
-  
-  # Aggiungiamo il testo con il valore arrotondato dentro ogni quadrato
-  geom_text(aes(label = round(Value, 1)), color = "black", size = 2.5) +
-  
-  # Evidenziamo il modello migliore con un riquadro rosso
-  geom_tile(data = min_vals, aes(x = factor(q), y = factor(p)), 
-            fill = NA, color = "red", size = 1.5) +
-  
-  facet_wrap(~ Metric, scales = "free") + # Due pannelli separati
-  scale_fill_distiller(palette = "Spectral", direction = 1) + # Colori dal rosso (alto) al blu (basso)
-  
-  labs(title = "ARIMA(p,1,q) Grid Search",
-       subtitle = "Lower values (Blue) are better. Red box indicates the minimum.",
-       x = "MA Order (q)",
-       y = "AR Order (p)",
-       fill = "Score") +
-  
-  theme_minimal() +
-  theme(panel.grid = element_blank())
 ```
 
 ```{r}
@@ -462,138 +389,10 @@ ggplot(results_long, aes(x = Model, y = Value, color = Metric, group = Metric)) 
 
 ```
 
-### ARIMA (2,1,3)
+### Model comparison
 
 ```{r}
 
-## 8. Training and Testing with ARIMA(2,1,3)
-
-library(forecast)
-library(ggplot2)
-
-# 1. Split Dataset (Il codice che hai fornito)
-nrows <- nrow(data_filtered)
-index_division <- floor(0.80 * nrows)
-
-train <- subset(data_filtered, 1:nrows <= index_division)
-test <- subset(data_filtered, 1:nrows > index_division)
-
-cat("Training set size:", nrow(train), "\n")
-cat("Test set size:", nrow(test), "\n")
-
-# 2. Costruzione del Modello ARIMA(2, 1, 3)
-# p=2 (AR), d=1 (Integration/Difference), q=5 (MA)
-model_final <- Arima(train$log_UMCSENT, order = c(2, 1, 3))
-
-# Mostriamo il sommario del modello (Coefficienti, AIC, BIC)
-print(summary(model_final))
-
-# 3. Analisi dei Residui
-# È fondamentale controllare che i residui siano "White Noise" (non correlati)
-checkresiduals(model_final)
-
-# Test di normalità sui residui
-shapiro_test <- shapiro.test(residuals(model_final))
-cat("Shapiro-Wilk test p-value:", shapiro_test$p.value, "\n")
-# Se p-value > 0.05, i residui sono normali.
-
-library(ggplot2)
-
-# Estrai i residui dal modello
-res_data <- data.frame(Residuals = as.numeric(residuals(model_final)))
-
-# Crea il QQ-Plot
-ggplot(res_data, aes(sample = Residuals)) +
-  stat_qq(color = "blue", alpha = 0.5, size = 2) + # I punti dei residui
-  stat_qq_line(color = "red", size = 1) +          # La linea della distribuzione normale teorica
-  labs(title = "Normal Q-Q Plot of Residuals",
-       subtitle = "Blue dots should follow the red line for normality",
-       x = "Theoretical Quantiles",
-       y = "Sample Quantiles") +
-  theme_minimal()
-
-# 4. ROLLING WINDOW FORECAST
-# ---------------------------------------------------------
-cat("\nStarting Rolling Forecast (this may take a few seconds)...\n")
-
-full_series <- data_filtered$log_UMCSENT
-n_train <- nrow(train)
-n_test <- nrow(test)
-
-# Vettore per salvare le previsioni
-rolling_preds <- numeric(n_test)
-
-# Ciclo per previsione One-Step Ahead
-for (i in 1:n_test) {
-  
-  # Dati disponibili fino al tempo t (Training iniziale + i dati di test osservati finora)
-  current_data <- full_series[1:(n_train + i - 1)]
-  
-  # Ristima del modello con i dati aggiornati
-  # Manteniamo l'ordine fisso c(2,1,3) ma ricalcoliamo i coefficienti
-  fit_temp <- Arima(current_data, order = c(2, 1, 3)) 
-  
-  # Previsione a 1 passo (il mese successivo)
-  rolling_preds[i] <- forecast(fit_temp, h = 1)$mean
-  
-  # Barra di progresso semplice
-  if(i %% 20 == 0) cat(".")
-}
-cat("\nRolling Forecast Completed.\n")
-# ---------------------------------------------------------
-
-# 5. Valutazione Accuratezza (Manuale per vettori)
-# Calcoliamo RMSE tra le previsioni rolling e i dati reali del test set
-actuals <- test$log_UMCSENT
-rmse_val <- sqrt(mean((rolling_preds - actuals)^2))
-mae_val <- mean(abs(rolling_preds - actuals))
-mape_val <- mean(abs((rolling_preds - actuals)/actuals)) * 100
-
-cat("\n--- Rolling Forecast Accuracy ---\n")
-cat("RMSE:", rmse_val, "\n")
-cat("MAE :", mae_val, "\n")
-cat("MAPE:", mape_val, "%\n")
-
-# 6. Visualizzazione Grafica: Training + Forecast vs Real Data
-df_plot_train <- data.frame(
-  Date = train$observation_date,
-  Value = train$log_UMCSENT,
-  Type = "Training Data"
-)
-
-df_plot_test <- data.frame(
-  Date = test$observation_date,
-  Value = test$log_UMCSENT,
-  Type = "Actual Test Data"
-)
-
-df_plot_forecast <- data.frame(
-  Date = test$observation_date,
-  Value = rolling_preds, 
-  Type = "Rolling Forecast"
-)
-
-# Uniamo tutto
-df_total <- rbind(df_plot_train, df_plot_test, df_plot_forecast)
-
-# Plot con ggplot2
-ggplot(df_total, aes(x = Date, y = Value, color = Type)) +
-  geom_line(size = 0.8) +
-  scale_color_manual(values = c("Training Data" = "gray60", 
-                                "Actual Test Data" = "black", 
-                                "Rolling Forecast" = "red")) +
-  # Linea verticale per separare visivamente train e test
-  geom_vline(xintercept = min(test$observation_date), linetype="dashed", color="blue", alpha=0.5) +
-  labs(title = "ARIMA(2,1,3) Rolling Forecast vs Actual Data",
-       subtitle = paste("One-step ahead prediction | RMSE:", round(rmse_val, 4)),
-       y = "Log(Consumer Sentiment)",
-       x = "Date") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-```
-
-```{r}
 
 ## 9. Model Comparison: Simpler Models & Benchmarks
 
@@ -611,9 +410,9 @@ actuals <- test$log_UMCSENT
 # 2. Definizione dei modelli da testare
 # Nome modello = c(p, d, q)
 models_list <- list(
-  "ARIMA(2,1,0)" = c(2, 1, 0),
-  "ARIMA(0,1,2)" = c(0, 1, 2),
-  "ARIMA(1,1,1)" = c(1, 1, 1),
+  "ARIMA(2,1,0)" = c(0, 1, 3),
+  "ARIMA(0,1,2)" = c(1, 1, 2),
+  "ARIMA(1,1,1)" = c(2, 1, 1),
   "ARIMA(0,1,0)" = c(0, 1, 0) # Random Walk (Benchmark di base)
 )
 
@@ -705,190 +504,349 @@ ggplot(comparison_results, aes(x = reorder(Model, RMSE), y = RMSE, fill = Model)
   theme(legend.position = "none")
 ```
 
-```{r}
-
-best_auto_model <- auto.arima(train$log_UMCSENT, 
-                              seasonal = FALSE, 
-                              stepwise = FALSE, 
-                              approximation = FALSE,
-                              trace = TRUE) # Mostra i modelli testati in tempo reale
-
-cat("\nBest Model selected by auto.arima:\n")
-print(best_auto_model)
-
-# Estraiamo l'ordine (p,d,q) trovato automaticamente
-auto_order <- arimaorder(best_auto_model)
-cat("Parameters found: p=", auto_order[1], " d=", auto_order[2], " q=", auto_order[3], "\n")
-```
+### ARIMA (0,1,3)
 
 ```{r}
+
+## 8. Training and Testing with ARIMA(0,1,3)
 
 library(forecast)
+library(ggplot2)
 
-# MODELS
+# 1. Split Dataset (Il codice che hai fornito)
+nrows <- nrow(data_filtered)
+index_division <- floor(0.80 * nrows)
 
-# 1. ARIMA(2,1,0) - PACF
-model_ar2 <- Arima(train$log_UMCSENT, order = c(2, 1, 0))
+train <- subset(data_filtered, 1:nrows <= index_division)
+test <- subset(data_filtered, 1:nrows > index_division)
 
-# 2. ARIMA(0,1,2) - ACF
-model_ma2 <- Arima(train$log_UMCSENT, order = c(0, 1, 2))
+cat("Training set size:", nrow(train), "\n")
+cat("Test set size:", nrow(test), "\n")
 
-# 3. ARIMA(1,1,1) 
-model_mixed <- Arima(train$log_UMCSENT, order = c(1, 1, 1))
+# 2. Costruzione del Modello ARIMA(0, 1, 3)
+# p=2 (AR), d=1 (Integration/Difference), q=5 (MA)
+model_final <- Arima(train$log_UMCSENT, order = c(0, 1, 3))
 
-# Comparison
+# Mostriamo il sommario del modello (Coefficienti, AIC, BIC)
+print(summary(model_final))
 
-comparison <- data.frame(
-  Model = c("ARIMA(2,1,0)", "ARIMA(0,1,2)", "ARIMA(1,1,1)"),
-  AIC = c(model_ar2$aic, model_ma2$aic, model_mixed$aic),
-  BIC = c(model_ar2$bic, model_ma2$bic, model_mixed$bic),
-  RMSE = c(accuracy(model_ar2)[2], accuracy(model_ma2)[2], accuracy(model_mixed)[2])
-)
+# 3. Analisi dei Residui
+# È fondamentale controllare che i residui siano "White Noise" (non correlati)
+checkresiduals(model_final)
 
-# ordered by AIC
-comparison <- comparison[order(comparison$AIC),]
-print(comparison)
+# Test di normalità sui residui
+shapiro_test <- shapiro.test(residuals(model_final))
+cat("Shapiro-Wilk test p-value:", shapiro_test$p.value, "\n")
+# Se p-value > 0.05, i residui sono normali.
 
-# Validation of the best model
-# best model
-best_model_name <- comparison$Model[1]
-cat("The best model is:", best_model_name, "\n")
+library(ggplot2)
 
-if(best_model_name == "ARIMA(2,1,0)") final_model <- model_ar2
-if(best_model_name == "ARIMA(0,1,2)") final_model <- model_ma2
-if(best_model_name == "ARIMA(1,1,1)") final_model <- model_mixed
+# Estrai i residui dal modello
+res_data <- data.frame(Residuals = as.numeric(residuals(model_final)))
 
-checkresiduals(final_model)
-```
+# Crea il QQ-Plot
+ggplot(res_data, aes(sample = Residuals)) +
+  stat_qq(color = "blue", alpha = 0.5, size = 2) + # I punti dei residui
+  stat_qq_line(color = "red", size = 1) +          # La linea della distribuzione normale teorica
+  labs(title = "Normal Q-Q Plot of Residuals",
+       subtitle = "Blue dots should follow the red line for normality",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal()
 
-```{r}
-
-# FORECAST 
+# 4. ROLLING WINDOW FORECAST
+# ---------------------------------------------------------
+cat("\nStarting Rolling Forecast (this may take a few seconds)...\n")
 
 full_series <- data_filtered$log_UMCSENT
 n_train <- nrow(train)
 n_test <- nrow(test)
 
-pred_ar2 <- numeric(n_test)
-pred_ma2 <- numeric(n_test)
-pred_mixed <- numeric(n_test)
+# Vettore per salvare le previsioni
+rolling_preds <- numeric(n_test)
 
-# Rolling window
-
+# Ciclo per previsione One-Step Ahead
 for (i in 1:n_test) {
+  
+  # Dati disponibili fino al tempo t (Training iniziale + i dati di test osservati finora)
   current_data <- full_series[1:(n_train + i - 1)]
   
-  # Model 1: ARIMA(2,1,0)
-  fit_ar2 <- Arima(current_data, order = c(2, 1, 0))
-  pred_ar2[i] <- forecast(fit_ar2, h = 1)$mean
+  # Ristima del modello con i dati aggiornati
+  # Manteniamo l'ordine fisso c(2,1,3) ma ricalcoliamo i coefficienti
+  fit_temp <- Arima(current_data, order = c(0, 1, 3)) 
   
-  # Model 2: ARIMA(0,1,2)
-  fit_ma2 <- Arima(current_data, order = c(0, 1, 2))
-  pred_ma2[i] <- forecast(fit_ma2, h = 1)$mean
+  # Previsione a 1 passo (il mese successivo)
+  rolling_preds[i] <- forecast(fit_temp, h = 1)$mean
   
-  # Model 3: ARIMA(1,1,1)
-  fit_mixed <- Arima(current_data, order = c(1, 1, 1))
-  pred_mixed[i] <- forecast(fit_mixed, h = 1)$mean
-
-  if(i %% 10 == 0) cat(".")
+  # Barra di progresso semplice
+  if(i %% 20 == 0) cat(".")
 }
+cat("\nRolling Forecast Completed.\n")
+# ---------------------------------------------------------
 
-# RMSE 
+# 5. Valutazione Accuratezza (Manuale per vettori)
+# Calcoliamo RMSE tra le previsioni rolling e i dati reali del test set
 actuals <- test$log_UMCSENT
-calc_rmse <- function(predicted, actual) {
-  sqrt(mean((predicted - actual)^2))
-}
+rmse_val <- sqrt(mean((rolling_preds - actuals)^2))
+mae_val <- mean(abs(rolling_preds - actuals))
+mape_val <- mean(abs((rolling_preds - actuals)/actuals)) * 100
 
-rmse_ar2 <- calc_rmse(pred_ar2, actuals)
-rmse_ma2 <- calc_rmse(pred_ma2, actuals)
-rmse_mixed <- calc_rmse(pred_mixed, actuals)
+cat("\n--- Rolling Forecast Accuracy ---\n")
+cat("RMSE:", rmse_val, "\n")
+cat("MAE :", mae_val, "\n")
+cat("MAPE:", mape_val, "%\n")
 
-# Comparison
-rolling_comparison <- data.frame(
-  Model = c("ARIMA(2,1,0)", "ARIMA(0,1,2)", "ARIMA(1,1,1)"),
-  RMSE_Rolling = c(rmse_ar2, rmse_ma2, rmse_mixed)
+# 6. Visualizzazione Grafica: Training + Forecast vs Real Data
+df_plot_train <- data.frame(
+  Date = train$observation_date,
+  Value = train$log_UMCSENT,
+  Type = "Training Data"
 )
 
-# Order RMSE
-rolling_comparison <- rolling_comparison[order(rolling_comparison$RMSE_Rolling),]
+df_plot_test <- data.frame(
+  Date = test$observation_date,
+  Value = test$log_UMCSENT,
+  Type = "Actual Test Data"
+)
 
-print(rolling_comparison)
+df_plot_forecast <- data.frame(
+  Date = test$observation_date,
+  Value = rolling_preds, 
+  Type = "Rolling Forecast"
+)
 
-best_rolling_model <- rolling_comparison$Model[1]
+# Uniamo tutto
+df_total <- rbind(df_plot_train, df_plot_test, df_plot_forecast)
+
+# Plot con ggplot2
+ggplot(df_total, aes(x = Date, y = Value, color = Type)) +
+  geom_line(size = 0.8) +
+  scale_color_manual(values = c("Training Data" = "gray60", 
+                                "Actual Test Data" = "black", 
+                                "Rolling Forecast" = "red")) +
+  # Linea verticale per separare visivamente train e test
+  geom_vline(xintercept = min(test$observation_date), linetype="dashed", color="blue", alpha=0.5) +
+  labs(title = "ARIMA(2,1,3) Rolling Forecast vs Actual Data",
+       subtitle = paste("One-step ahead prediction | RMSE:", round(rmse_val, 4)),
+       y = "Log(Consumer Sentiment)",
+       x = "Date") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
 ```
+
+### ARIMA (1,1,2)
 
 ```{r}
 
-# PLOT FORECASTS
 
-if (best_rolling_model == "ARIMA(2,1,0)") {
-  best_preds <- pred_ar2
-} else if (best_rolling_model == "ARIMA(0,1,2)") {
-  best_preds <- pred_ma2
-} else {
-  best_preds <- pred_mixed
-}
+## 8. Training and Testing with ARIMA(1,1,2)
 
-time_index <- 1:nrow(data_filtered)
-train_indices <- 1:nrow(train)
-test_indices  <- (nrow(train) + 1):nrow(data_filtered)
+library(forecast)
+library(ggplot2)
 
+# 1. Split Dataset (Il codice che hai fornito)
+nrows <- nrow(data_filtered)
+index_division <- floor(0.80 * nrows)
+
+train <- subset(data_filtered, 1:nrows <= index_division)
+test <- subset(data_filtered, 1:nrows > index_division)
+
+cat("Training set size:", nrow(train), "\n")
+cat("Test set size:", nrow(test), "\n")
+
+# 2. Costruzione del Modello ARIMA(0, 1, 3)
+# p=2 (AR), d=1 (Integration/Difference), q=5 (MA)
+model_final <- Arima(train$log_UMCSENT, order = c(1, 1, 2))
+
+# Mostriamo il sommario del modello (Coefficienti, AIC, BIC)
+print(summary(model_final))
+
+# 3. Analisi dei Residui
+# È fondamentale controllare che i residui siano "White Noise" (non correlati)
+checkresiduals(model_final)
+
+# Test di normalità sui residui
+shapiro_test <- shapiro.test(residuals(model_final))
+cat("Shapiro-Wilk test p-value:", shapiro_test$p.value, "\n")
+# Se p-value > 0.05, i residui sono normali.
 
 library(ggplot2)
 
-df_plot <- data.frame(
-  Time = time_index,
-  Value = data_filtered$log_UMCSENT,
-  Type = "Dati Reali"
-)
+# Estrai i residui dal modello
+res_data <- data.frame(Residuals = as.numeric(residuals(model_final)))
 
-df_pred <- data.frame(
-  Time = test_indices,
-  Value = best_preds,
-  Type = "Forecast"
-)
+# Crea il QQ-Plot
+ggplot(res_data, aes(sample = Residuals)) +
+  stat_qq(color = "blue", alpha = 0.5, size = 2) + # I punti dei residui
+  stat_qq_line(color = "red", size = 1) +          # La linea della distribuzione normale teorica
+  labs(title = "Normal Q-Q Plot of Residuals",
+       subtitle = "Blue dots should follow the red line for normality",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal()
 
-ggplot() +
-  geom_line(data = df_plot, aes(x = Time, y = Value, color = "Dati Reali"), size = 0.8, alpha = 0.7) +
-  geom_line(data = df_pred, aes(x = Time, y = Value, color = "Forecast"), size = 1) +
-  geom_vline(xintercept = max(train_indices), linetype = "dashed", color = "blue", alpha = 0.6) +
+# 4. ROLLING WINDOW FORECAST
+# ---------------------------------------------------------
+cat("\nStarting Rolling Forecast (this may take a few seconds)...\n")
+
+full_series <- data_filtered$log_UMCSENT
+n_train <- nrow(train)
+n_test <- nrow(test)
+
+# Vettore per salvare le previsioni
+rolling_preds <- numeric(n_test)
+
+# Ciclo per previsione One-Step Ahead
+for (i in 1:n_test) {
   
-  labs(title = paste("Consumer Sentiment Index Forecast with", best_rolling_model),
-       subtitle = "Real Values vs Rolling Forecast (One-Step Ahead)",
-       y = "Log UMCSENT", 
-       x = "",
-       color = "") +
+  # Dati disponibili fino al tempo t (Training iniziale + i dati di test osservati finora)
+  current_data <- full_series[1:(n_train + i - 1)]
   
-  scale_color_manual(values = c("Real Values" = "black", "Forecast" = "red")) +
+  # Ristima del modello con i dati aggiornati
+  # Manteniamo l'ordine fisso c(2,1,3) ma ricalcoliamo i coefficienti
+  fit_temp <- Arima(current_data, order = c(1, 1, 2)) 
   
-  theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    plot.title = element_text(face = "bold", size = 14),
-    legend.text = element_text(size = 11)
-  )
-```
-
-```{r}
-
-# RESIDUALS
-full_data_series <- data_filtered$log_UMCSENT
-
-if (best_rolling_model == "ARIMA(2,1,0)") {
-  final_best_fit <- Arima(full_data_series, order = c(2, 1, 0))
-} else if (best_rolling_model == "ARIMA(0,1,2)") {
-  final_best_fit <- Arima(full_data_series, order = c(0, 1, 2))
-} else {
-  final_best_fit <- Arima(full_data_series, order = c(1, 1, 1))
+  # Previsione a 1 passo (il mese successivo)
+  rolling_preds[i] <- forecast(fit_temp, h = 1)$mean
+  
+  # Barra di progresso semplice
+  if(i %% 20 == 0) cat(".")
 }
+cat("\nRolling Forecast Completed.\n")
+# ---------------------------------------------------------
 
-checkresiduals(final_best_fit)
+# 5. Valutazione Accuratezza (Manuale per vettori)
+# Calcoliamo RMSE tra le previsioni rolling e i dati reali del test set
+actuals <- test$log_UMCSENT
+rmse_val <- sqrt(mean((rolling_preds - actuals)^2))
+mae_val <- mean(abs(rolling_preds - actuals))
+mape_val <- mean(abs((rolling_preds - actuals)/actuals)) * 100
 
-shapiro_res <- shapiro.test(residuals(final_best_fit))
-cat("\nNormality Test (Shapiro-Wilk) p-value:", shapiro_res$p.value, "\n")
+cat("\n--- Rolling Forecast Accuracy ---\n")
+cat("RMSE:", rmse_val, "\n")
+cat("MAE :", mae_val, "\n")
+cat("MAPE:", mape_val, "%\n")
+
+# 6. Visualizzazione Grafica: Training + Forecast vs Real Data
+df_plot_train <- data.frame(
+  Date = train$observation_date,
+  Value = train$log_UMCSENT,
+  Type = "Training Data"
+)
+
+df_plot_test <- data.frame(
+  Date = test$observation_date,
+  Value = test$log_UMCSENT,
+  Type = "Actual Test Data"
+)
+
+df_plot_forecast <- data.frame(
+  Date = test$observation_date,
+  Value = rolling_preds, 
+  Type = "Rolling Forecast"
+)
+
+# Uniamo tutto
+df_total <- rbind(df_plot_train, df_plot_test, df_plot_forecast)
+
+# Plot con ggplot2
+ggplot(df_total, aes(x = Date, y = Value, color = Type)) +
+  geom_line(size = 0.8) +
+  scale_color_manual(values = c("Training Data" = "gray60", 
+                                "Actual Test Data" = "black", 
+                                "Rolling Forecast" = "red")) +
+  # Linea verticale per separare visivamente train e test
+  geom_vline(xintercept = min(test$observation_date), linetype="dashed", color="blue", alpha=0.5) +
+  labs(title = "ARIMA(2,1,3) Rolling Forecast vs Actual Data",
+       subtitle = paste("One-step ahead prediction | RMSE:", round(rmse_val, 4)),
+       y = "Log(Consumer Sentiment)",
+       x = "Date") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+## 11. Residual Diagnostics
+
+```{r}
+
+## 7. Analisi dei Residui del Test Set (Forecast Errors)
+# ---------------------------------------------------------
+cat("\n--- Analisi Approfondita dei Residui di Previsione (Test Set) ---\n")
+
+# 1. Calcolo dei residui (Reale - Previsto)
+test_residuals <- test$log_UMCSENT - rolling_preds
+df_test_res <- data.frame(Date = test$observation_date, Residuals = test_residuals)
+
+# 2. Statistiche Descrittive
+mean_res <- mean(test_residuals)
+sd_res <- sd(test_residuals)
+
+cat("Media dei residui (Bias):", mean_res, "(Ideale: vicino a 0)\n")
+cat("Deviazione Standard:", sd_res, "\n")
+
+# T-test per vedere se la media è statisticamente diversa da 0 (Bias check)
+t_test <- t.test(test_residuals)
+cat("T-test p-value (H0: mean=0):", t_test$p.value, "\n")
+# Se p-value < 0.05, il modello ha un bias sistematico (sovrastima o sottostima costantemente).
+
+# 3. Test di Ljung-Box sui residui del test
+# Verifica se c'è ancora informazione (autocorrelazione) non catturata negli errori
+lb_test <- Box.test(test_residuals, lag = 10, type = "Ljung-Box")
+cat("Ljung-Box Test p-value:", lb_test$p.value, "\n")
+# Se p-value > 0.05: Ottimo, gli errori sono "White Noise".
+# Se p-value < 0.05: Male, c'è ancora autocorrelazione negli errori.
+
+# 4. Test di Normalità (Shapiro-Wilk)
+shapiro_test_res <- shapiro.test(test_residuals)
+cat("Shapiro-Wilk Test p-value:", shapiro_test_res$p.value, "\n")
+
+# ---------------------------------------------------------
+# VISUALIZZAZIONE GRAFICA DEI RESIDUI DEL TEST
+# ---------------------------------------------------------
+
+# A. Time Plot dei Residui (per vedere se la varianza cambia nel tempo)
+p1 <- ggplot(df_test_res, aes(x = Date, y = Residuals)) +
+  geom_line(color = "darkblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Time Plot of Test Residuals",
+       subtitle = "Residuals should fluctuate randomly around 0",
+       y = "Residuals (Error)", x = "Date") +
+  theme_minimal()
+print(p1)
+
+# B. ACF Plot dei Residui (Autocorrelazione)
+# Usiamo ggAcf della libreria forecast
+p2 <- ggAcf(test_residuals) +
+  labs(title = "ACF of Test Residuals",
+       subtitle = "Bars should stay within blue dashed lines (95% CI)") +
+  theme_minimal()
+print(p2)
+
+# C. Istogramma con curva normale sovrapposta
+p3 <- ggplot(df_test_res, aes(x = Residuals)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "skyblue", color = "white", alpha = 0.7) +
+  stat_function(fun = dnorm, args = list(mean = mean_res, sd = sd_res), color = "red", size = 1) +
+  labs(title = "Histogram of Test Residuals",
+       subtitle = "Checking for Normal Distribution",
+       x = "Residuals", y = "Density") +
+  theme_minimal()
+print(p3)
+
+# D. QQ-Plot
+p4 <- ggplot(df_test_res, aes(sample = Residuals)) +
+  stat_qq(color = "blue", alpha = 0.5) +
+  stat_qq_line(color = "red", size = 1) +
+  labs(title = "QQ-Plot of Test Residuals", 
+       subtitle = "Points should follow the red line",
+       x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme_minimal()
+print(p4)
 ```
 
 ```{r}
+
 
 # AR ROOTS
 library(forecast)
@@ -921,16 +879,4 @@ p2 <- autoplot(model_diff_check) +
 # Display plots
 print(p1)
 print(p2)
-```
-
-```{r}
-# # CORRELATION TEST
-# #Barletts' bands
-# bartlett.test(data_filtered$log_UMCSENT ~ as.factor(cut(seq_along(data_filtered$log_UMCSENT), 10)))
-# #Box-Pierce
-# Box.test(data_filtered$log_UMCSENT, lag = 10, type = "Box-Pierce") # high autocorrelation
-# Box.test(diff_log, lag = 10, type = "Box-Pierce")
-# #Ljung-Box
-# Box.test(data_filtered$log_UMCSENT, lag = 10, type = "Ljung-Box") # high autocorrelation
-
 ```
