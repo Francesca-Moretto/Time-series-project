@@ -105,8 +105,6 @@ df_numeric_imputed <- df_numeric %>%
 colSums(is.na(df_numeric_imputed))
 ```
 
-
-
 ```{r}
 
 # --- Librerie necessarie per ARIMAX ---
@@ -170,6 +168,21 @@ train_x <- train_ts_diff[, c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrat
 test_y <- test_ts_diff[, "d_Sentiment"]
 test_x <- test_ts_diff[, c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
 ```
+
+```{r}
+
+# Calcoliamo ACF e PACF sulla serie differenziata (d_Sentiment)
+par(mfrow = c(1, 2)) # Mette i grafici vicini
+
+# PACF per trovare 'p' (AR)
+pacf(ts_diff[, "d_Sentiment"], main = "PACF: Cerca il Lag 'p'")
+
+# ACF per trovare 'q' (MA)
+acf(ts_diff[, "d_Sentiment"], main = "ACF: Cerca il Lag 'q'")
+
+par(mfrow = c(1, 1))
+```
+
 
 ```{r}
 
