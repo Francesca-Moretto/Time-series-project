@@ -51,21 +51,37 @@ ggplot(data, aes(x = observation_date, y = UMCSENT)) +
 
 # 3. Data preparation and summaries
 
-# data from 1978
+# Data from 1978
 data_filtered <- subset(data, observation_date >= "1978-01-01")
 nrow(data_filtered) # 573
 range(data_filtered$observation_date) # "1978-01-01" "2025-09-01"
 
 ggplot(data_filtered, aes(x = observation_date, y = UMCSENT)) +
   geom_line() +
-  labs(title = 'Consumer Sentiment Index')
+  labs(title = 'Consumer Sentiment Index (1978 - 2025)',
+       x = "Year")
 
-# statistics
+# Statistics
 summary(data_filtered$UMCSENT) 
 
-# check outliers
-hist(data_filtered$UMCSENT, breaks = 20) # not normally distributed
-boxplot(data_filtered$UMCSENT) # values are distributed in the 70-90 range with 88.2 as the median
+# Check outliers
+
+# Histogram
+ggplot(data_filtered, aes(x = UMCSENT)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "white") +
+  labs(title = "Consumer Sentiment Index Distribution",
+       x = "UMCSENT",
+       y = "Frequency") +
+  theme_minimal() # not normally distributed
+
+# Boxplot
+ggplot(data_filtered, aes(y = UMCSENT)) +
+  geom_boxplot(fill = "lightblue", color = "black", outlier.colour = "red") +
+  labs(title = "Boxplot - Consumer Sentiment Index",
+       y = "UMCSENT") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
 
 
 ```
@@ -79,7 +95,8 @@ data_filtered$log_UMCSENT <- log(data_filtered$UMCSENT)
 
 ggplot(data_filtered, aes(x = observation_date, y = log_UMCSENT)) +
   geom_line() +
-  labs(title = 'Log (Consumer Sentiment Index)')
+  labs(title = 'Log (Consumer Sentiment Index)',
+       x = "Year")
 
 ```
 
@@ -102,28 +119,51 @@ This test checks for the presence of a unit root (non-stationarity).
 
 -   $H_1$ (Alternative Hypothesis): The series **is stationary**.
 
--   **Result:** The test statistic value ($t$) is **-3.5248**. This is more negative than the 1% critical value (-3.43).
+-   The test statistic value ($t$) is **-3.5248** \< 1% critical value (-3.43).
 
--   **Conclusion:** **Reject** $H_0$. According to this test, the series is considered **stationary** (with a 99% confidence level).
+-   Reject H0 (non-stationarity) -\> the series is **stationary**.
 
 ### 2. KPSS Test
-
-This test works with the opposite hypotheses compared to the ADF test.
 
 -   $H_0$ (Null Hypothesis): The series **is stationary** (level stationarity).
 
 -   $H_1$ (Alternative Hypothesis): The series is **not stationary**.
 
--   **Result:** The *p-value* is **0.01** (indicating it is smaller than the printed value).
+-   The *p-value* is **0.01** (indicating it is smaller than the printed value) \< 0.05 (5%).
 
--   **Conclusion:** Since the p-value is lower than the standard threshold of 0.05 (5%), **reject** $H_0$. According to this test, the series is **not stationary**.
+-   Reject $H_0$. According to this test, the series is **not stationary**.
 
 ## 6. ACF and PACF
 
 ```{r}
 # ACF and PACF
-acf(data_filtered$log_UMCSENT)
-pacf(data_filtered$log_UMCSENT)
+
+# ACF
+acf_obj <- acf(data_filtered$log_UMCSENT, plot = FALSE)
+acf_df <- data.frame(lag = acf_obj$lag[-1], acf = acf_obj$acf[-1]) 
+
+ci <- 1.96 / sqrt(length(data_filtered$log_UMCSENT))
+
+ggplot(acf_df, aes(x = lag, y = acf)) +
+  geom_hline(yintercept = 0, color = "black") + # Asse orizzontale
+  geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "darkgrey") + 
+  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 1) + 
+  scale_x_continuous(breaks = seq(1, 25, 2), expand = c(0,0.1)) +
+  labs(title = "Autocorrelation Function (ACF)", y = "ACF") +
+  theme_minimal()
+
+# PACF
+pacf_obj <- pacf(data_filtered$log_UMCSENT, plot = FALSE)
+pacf_df <- data.frame(lag = pacf_obj$lag, pacf = pacf_obj$acf)
+
+ggplot(pacf_df, aes(x = lag, y = pacf)) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "darkgrey") +
+  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 1) +
+  scale_x_continuous(breaks = seq(1, 25, 2), expand = c(0,0.1)) +
+  labs(title = "Partial Autocorrelation Function (PACF)", y = "PACF") +
+  theme_minimal()
+
 
 ```
 
@@ -136,11 +176,13 @@ data_filtered$diff_log_UMCSENT <- c(NA, diff_log)
 
 ggplot(data_filtered, aes(x = observation_date, y = diff_log_UMCSENT)) +
   geom_line() +
-  labs(title = 'First difference log(Consumer Sentiment Index)')
+  labs(title = 'First Difference of Consumer Sentiment Index (in logs)',
+       x = "Year",
+       y = "Differenced UMCSENT (in logs)")
 
 ```
 
-### 7.1 Stationarity
+### 7.1 Stationarity Tests on Differenced Data
 
 ```{r}
 
@@ -153,23 +195,15 @@ kpss.test(diff_log)
 
 ### 1. Augmented Dickey-Fuller (ADF) Test
 
--   $H_0$ (Null Hypothesis): The series is **not stationary** (has a unit root).
+-   The test statistic is **-19.6373** \<1% critical value (-3.43).
 
--   $H_1$ (Alternative Hypothesis): The series **is stationary**.
-
--   **Result:** The test statistic is **-19.6373**. This is extremely negative and far below the 1% critical value (-3.43).
-
--   **Conclusion:** **Strongly reject** $H_0$. The series is definitely **stationary**.
+-   **reject** $H_0$ -\> series is **stationary**.
 
 ### 2. KPSS Test
 
--   $H_0$ (Null Hypothesis): The series **is stationary**.
+-   The *p-value* is **0.1** (with the warning "p-value greater than printed p-value," implying the actual probability is even higher, likely \> 0.10) \> 0.05
 
--   $H_1$ (Alternative Hypothesis): The series is **not stationary**.
-
--   **Result:** The *p-value* is **0.1** (with the warning "p-value greater than printed p-value," implying the actual probability is even higher, likely \> 0.10).
-
--   **Conclusion:** Since the p-value is greater than 0.05, **fail to reject** $H_0$. The evidence supports the conclusion that the series is **stationary**.
+-   **fail to reject** $H_0$ -\> series is **stationary**.
 
 ### 7.2 ACF and PACF - Differenced Data
 
@@ -203,6 +237,76 @@ pacf_table <- data.frame(
   PACF = pacf_values$acf[,,1]
 )
 print(pacf_table)
+
+# ACF and PACF
+
+library(ggplot2)
+library(gridExtra) 
+
+# --- 1. Preparazione dei Dati ---
+
+# IMPORTANTE: La funzione diff() crea dei valori NA all'inizio. 
+# Dobbiamo rimuoverli per calcolare correttamente la lunghezza N e i grafici.
+diff_data_clean <- na.omit(diff_log)
+
+# Calcolo della soglia di significatività (Intervallo di Confidenza 95%)
+n_obs <- length(diff_data_clean)
+ci_threshold <- 1.96 / sqrt(n_obs)
+
+# --- 2. Calcolo ACF ---
+
+# Calcoliamo i valori senza fare il grafico
+acf_obj <- acf(diff_data_clean, lag.max = 36, plot = FALSE)
+
+# Creiamo il dataframe per ggplot
+# NOTA: Rimuoviamo il primo valore [-1] perché è il Lag 0, che ha sempre 
+# correlazione 1 e spesso distorce visivamente il grafico.
+acf_df <- data.frame(
+  lag = acf_obj$lag[-1], 
+  acf_value = acf_obj$acf[-1]
+)
+
+# Costruzione del grafico ACF
+plot_acf <- ggplot(acf_df, aes(x = lag, y = acf_value)) +
+  # Linea orizzontale dello zero
+  geom_hline(yintercept = 0, color = "black") +
+  # Linee di confidenza tratteggiate blu
+  geom_hline(yintercept = c(-ci_threshold, ci_threshold), linetype = "dashed", color = "blue") +
+  # Le "stanghette" verticali (lollipop stems)
+  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 0.7) +
+  # (Opzionale) Aggiungi un punto in cima alla stanghetta
+  # geom_point(size = 2, color = "black") + 
+  scale_x_continuous(breaks = seq(0, 36, 4)) + # Etichette asse X ogni 4 lag
+  labs(title = "ACF - First Difference", y = "ACF", x = "Lag") +
+  theme_minimal()
+
+# --- 3. Calcolo PACF ---
+
+# Calcoliamo i valori senza fare il grafico
+pacf_obj <- pacf(diff_data_clean, lag.max = 36, plot = FALSE)
+
+# Creiamo il dataframe per ggplot
+# Il PACF solitamente parte già dal Lag 1, quindi prendiamo tutto.
+pacf_df <- data.frame(
+  lag = pacf_obj$lag, 
+  pacf_value = pacf_obj$acf
+)
+
+# Costruzione del grafico PACF (struttura identica all'ACF)
+plot_pacf <- ggplot(pacf_df, aes(x = lag, y = pacf_value)) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-ci_threshold, ci_threshold), linetype = "dashed", color = "blue") +
+  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 0.7) +
+  scale_x_continuous(breaks = seq(0, 36, 4)) +
+  labs(title = "PACF - First Difference", y = "PACF", x = "Lag") +
+  theme_minimal()
+
+# --- 4. Visualizzazione Combinata ---
+
+# Usiamo grid.arrange per metterli uno accanto all'altro (ncol = 2)
+# Questo sostituisce par(mfrow = c(1, 2))
+grid.arrange(plot_acf, plot_pacf, ncol = 2)
+
 
 ```
 
