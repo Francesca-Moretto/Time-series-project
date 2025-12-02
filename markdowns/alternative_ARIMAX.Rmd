@@ -1,431 +1,179 @@
 ---
-title: "alternative_ARIMAX"
+title: "Alternative model"
 output: html_document
 date: "2025-11-19"
 ---
-## Datasets upload
-
 ```{r}
-library(xts)
-library(dplyr)
-# --- FUNZIONE PER LEGGERE I CSV (UGUALE ALLA TUA) ---
 
-read_fred_csv <- function(filename, col_name) {
-  path <- file.path("data", filename)
-  if(!file.exists(path)) {
-    warning("File mancante: ", path)
-    return(NULL)
-  }
-  df <- read.csv(path, stringsAsFactors = FALSE)
-  dates <- as.Date(df[,1], tryFormats = c("%Y-%m-%d","%d/%m/%Y","%Y/%m/%d"))
-  values <- as.numeric(df[,2])
-  clean <- na.omit(data.frame(Date = dates, Value = values))
-  if(nrow(clean) == 0) return(NULL)
-  xts_obj <- xts(clean$Value, order.by = clean$Date)
-  colnames(xts_obj) <- col_name
-  return(xts_obj)
+# ==============================================================================
+# 1. LIBRERIE E CONFIGURAZIONE
+# ==============================================================================
+library(ggplot2)
+library(forecast)
+library(dplyr)
+library(lubridate)
+library(tseries)
+
+# ==============================================================================
+# 2. CARICAMENTO E PREPARAZIONE DATI
+# ==============================================================================
+
+# Funzione helper per caricare e formattare la data
+load_and_prep <- function(filename) {
+  df <- read.csv(filename)
+  # Conversione data
+  df$observation_date <- as.Date(df$observation_date, format = "%Y-%m-%d")
+  return(df)
 }
 
-# --- 1. CARICAMENTO DELLE SERIE ---
+# Caricamento dei file (Assicurati che siano nella working directory)
+df_sent <- load_and_prep("data/UMCSENT.csv")
+df_oil  <- load_and_prep("data/WTISPLC.csv")
+df_pi   <- load_and_prep("data/PI.csv")
+df_cpi  <- load_and_prep("data/CPIAUCSL.csv")
+df_un   <- load_and_prep("data/UNRATE.csv")
+df_ind  <- load_and_prep("data/INDPRO.csv")
+df_fed  <- load_and_prep("data/FEDFUNDS.csv")
 
-UMCSENT  <- read_fred_csv("UMCSENT.csv",  "Sentiment")
-WTISPLC  <- read_fred_csv("WTISPLC.csv",  "Oil")
-PI       <- read_fred_csv("PI.csv",       "Income")
-CPIAUCSL <- read_fred_csv("CPIAUCSL.csv", "CPI")
-UNRATE   <- read_fred_csv("UNRATE.csv",   "Unrate")
-INDPRO   <- read_fred_csv("INDPRO.csv",   "IndPro")
-FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
+# Unione dei dataset in un unico dataframe usando la data
+list_dfs <- list(df_sent, df_oil, df_pi, df_cpi, df_un, df_ind, df_fed)
+full_data <- Reduce(function(x, y) merge(x, y, by = "observation_date", all = FALSE), list_dfs)
 
-# --- 2. METTI TUTTI GLI xts IN UNA LISTA ---
+# Filtro temporale (dal 1978 come da analisi precedente)
+data_filtered <- subset(full_data, observation_date >= "1978-01-01")
+data_filtered <- na.omit(data_filtered)
 
-series_list <- list(
-  UMCSENT, WTISPLC, PI, CPIAUCSL,
-  UNRATE, INDPRO, FEDFUNDS
+# ==============================================================================
+# 3. TRASFORMAZIONI VARIABILI (LOG E DIFFERENZE PER REGRESSORI)
+# ==============================================================================
+
+# -- VARIABILE TARGET (LIVELLO) --
+# Usiamo il Log-Livello. Non differenziamo Y qui, lo farà il modello se serve.
+data_filtered$ln_UMCSENT <- log(data_filtered$UMCSENT)
+
+# -- REGRESSORI (MACROECONOMIC VARIABLES) --
+# Trasformiamo i regressori in Log
+data_filtered$ln_Oil     <- log(data_filtered$WTISPLC)
+data_filtered$ln_Income  <- log(data_filtered$PI)
+data_filtered$ln_CPI     <- log(data_filtered$CPIAUCSL)
+data_filtered$ln_IndPro  <- log(data_filtered$INDPRO)
+
+# Calcoliamo le differenze per i regressori (Growth Rates / Shocks)
+# Usiamo le variazioni delle macro-variabili per spiegare il livello del sentiment
+d_Oil     <- c(NA, diff(data_filtered$ln_Oil))
+d_Income  <- c(NA, diff(data_filtered$ln_Income))
+d_CPI     <- c(NA, diff(data_filtered$ln_CPI))       
+d_IndPro  <- c(NA, diff(data_filtered$ln_IndPro))
+d_Unrate  <- c(NA, diff(data_filtered$UNRATE))   # Variazione tasso disoccupazione
+d_FedFunds<- c(NA, diff(data_filtered$FEDFUNDS)) # Variazione tassi interesse
+
+# Aggiungiamo le differenze al dataframe temporaneo
+# (Nota: la prima riga sarà NA)
+data_filtered$d_Oil <- d_Oil
+data_filtered$d_Income <- d_Income
+data_filtered$d_CPI <- d_CPI
+data_filtered$d_IndPro <- d_IndPro
+data_filtered$d_Unrate <- d_Unrate
+data_filtered$d_FedFunds <- d_FedFunds
+
+# Rimuoviamo la prima riga con NA generati dalle differenze
+model_data <- na.omit(data_filtered)
+
+# ==============================================================================
+# 4. CREAZIONE STRUTTURA LAGGED (PER PREVISIONE EX-ANTE)
+# ==============================================================================
+# Obiettivo: Prevedere Y(t) usando X(t-1).
+# Questo ci permette di fare previsioni reali per il mese successivo.
+
+# Funzione lag
+lag_x <- function(x, k=1) {
+  c(rep(NA, k), x[1:(length(x)-k)])
+}
+
+# Creiamo la matrice dei regressori RITARDATI di 1 mese
+X_matrix <- cbind(
+  Oil_lag      = lag_x(model_data$d_Oil),
+  Income_lag   = lag_x(model_data$d_Income),
+  CPI_lag      = lag_x(model_data$d_CPI),
+  Unrate_lag   = lag_x(model_data$d_Unrate),
+  IndPro_lag   = lag_x(model_data$d_IndPro),
+  FedFunds_lag = lag_x(model_data$d_FedFunds)
 )
 
-# --- 3. FILTRA NULL (serie mancanti) ---
-series_list <- series_list[!sapply(series_list, is.null)]
-
-# --- 4. MERGE AUTOMATICO DI TUTTE LE SERIE ---
-merged_data <- Reduce(function(x, y) merge(x, y, all = TRUE), series_list)
-merged_data_1978 <- merged_data["1978/"]
-nrow(merged_data_1978)
-start(merged_data_1978)
-end(merged_data_1978)
-
-# --- 5. RISULTATO FINALE ---
-head(merged_data)
-
-#---- 6. log transformation ---
-merged_data_1978$log_Sentiment <- log(merged_data_1978$Sentiment)
-merged_data_1978$log_Oil       <- log(merged_data_1978$Oil)
-merged_data_1978$log_Income    <- log(merged_data_1978$Income)
-merged_data_1978$log_CPI       <- log(merged_data_1978$CPI)
-merged_data_1978$IndPro <- as.numeric(merged_data_1978$IndPro)
-merged_data_1978$log_IndProd   <- log(merged_data_1978$IndPro)
-
-merged_data_1978$d_Sentiment <- diff(merged_data_1978$log_Sentiment)
-merged_data_1978$d_Oil       <- diff(merged_data_1978$log_Oil)
-merged_data_1978$d_Income    <- diff(merged_data_1978$log_Income)
-merged_data_1978$d_CPI       <- diff(merged_data_1978$log_CPI)
-merged_data_1978$d_IndProd   <- diff(merged_data_1978$log_IndProd)
-merged_data_1978$d_Unrate    <- diff(merged_data_1978$Unrate)
-merged_data_1978$d_FedFunds  <- diff(merged_data_1978$FedFunds)
-head(merged_data_1978)
-
-#--- 7. scaling distributions ---
-library(timetk)
-colonne_da_scalare <- c("log_Sentiment", "log_Oil", "log_Income", "log_CPI", "log_IndProd", "Unrate", "FedFunds")
-df_scaled_converted <- merged_data_1978 %>%
-  timetk::tk_tbl(rename_index = "Date") %>% 
-  
-
-select(Date, log_Sentiment, log_Oil, log_Income, log_CPI, log_IndProd, Unrate, FedFunds) %>%
-  
-mutate(
-    across(
-      .cols = all_of(colonne_da_scalare), # Seleziona solo le colonne da scalare
-      .fns = ~as.numeric(scale(.)) # Applica la funzione scale e assicurati che sia numerico
-    )
-  )
-library(factoextra)
-library(tidyr)
-library(dplyr) # Necessaria per la funzione select()
-
-# 1. Crea il dataframe numerico (se non lo hai già fatto)
-df_numeric <- df_scaled_converted %>%
-  select(-Date) 
-
-# 2. Esegui l'imputazione: Sostituisci NA con il valore precedente
-df_numeric_imputed <- df_numeric %>%
-  # fill() applica l'imputazione. 'everything()' indica tutte le colonne, 
-  # e '.direction = "down"' usa l'ultima osservazione valida precedente (LOCF).
-  fill(everything(), .direction = "down") 
-
-# 3. Verifica i risultati: Dovrebbe essere tutto a zero
-colSums(is.na(df_numeric_imputed))
-```
-
-
-```{r}
-# Esegui la PCA sul dataframe imputato
-pca_res <- prcomp(df_numeric_imputed, scale = FALSE)
-
-# 4. Plot Scree Plot
-plot(pca_res, type = "l", main = "Scree Plot - Varianza Spiegata")
-```
-
-
-```{r}
-# Definiamo il numero di fattori da estrarre (k=2)
-k <- 2
-
-# Estrai i punteggi fattoriali (factor scores) per i primi 'k' fattori
-# Questi sono i valori delle tue nuove serie temporali latenti.
-factor_scores_matrix <- predict(pca_res)[, 1:k]
-
-# Trasforma i punteggi in un data frame o tibble per la gestione successiva
-# (La funzione predict(pca_res) restituisce una matrice)
-factor_scores_df <- as.data.frame(factor_scores_matrix) %>%
-  rename(Fattore1 = PC1, Fattore2 = PC2)
-
-# Dai un'occhiata alle prime righe per verificare
-head(factor_scores_df)
-
-# Recupera la colonna Date dall'oggetto originale imputato (prima della PCA)
-Date_col <- df_scaled_converted %>% 
-  select(Date) %>%
-  filter(!is.na(df_scaled_converted$log_Income)) # Assicurati di allinearti alle righe usate nella PCA
-  # *ATTENZIONE: Questo richiede l'uso di na.omit() per l'imputazione se è stato quello il metodo.*
-  # Se hai usato fill(everything(), .direction = "down"), l'allineamento è diretto.
-
-# Allineamento usando la colonna Data del tuo oggetto originale:
-df_factors <- df_scaled_converted %>%
-  select(Date) %>%
-  # Nota: Stiamo assumendo che l'ordine delle righe sia lo stesso di df_numeric_imputed
-  # (se hai usato fill(), questo è vero).
-  bind_cols(factor_scores_df) 
-
-# df_factors contiene ora le tue due serie temporali (Fattore1 e Fattore2) pronte per il DFM.
-
-```
-
-```{r}
-## 1. Interpretazione dei Pesi (Loadings)
-
-# Estrai i loadings (coefficienti delle variabili sui fattori)
-# I loadings si trovano nella rotazione (prima di predict)
-loadings_matrix <- pca_res$rotation[, 1:k]
-
-# Converti in data frame per una migliore visualizzazione
-loadings_df <- as.data.frame(loadings_matrix) %>%
-  rename(Fattore1 = PC1, Fattore2 = PC2)
-
-# Arrotonda per chiarezza
-print(round(loadings_df, 3))
-
-# Usa factoextra per una visualizzazione grafica dei contributi
-# (Utile per capire quali variabili "caricano" su quale fattore)
-library(factoextra)
-fviz_pca_var(pca_res, 
-             axes = c(1, 2), # Visualizza solo i primi due fattori
-             col.var = "contrib", # Colora per contributo
-             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-             repel = TRUE # Evita sovrapposizioni
-) +
-  ggtitle("Loadings Plot: Contributo al Fattore 1 e 2")
-```
-
-```{r}
-## 2. Modellazione dei Fattori con VAR (Dynamic Factor Model Core)
-
-library(vars)
-
-# --- INIZIO: Usa il data frame 'factor_scores_df' creato dopo la PCA ---
-# 'factor_scores_df' è un data frame con due colonne chiamate "Fattore1" e "Fattore2"
-factors_for_var <- factor_scores_df 
-# Se vuoi includere la data (utile per la visualizzazione successiva):
-# factors_for_var <- df_factors %>% select(Fattore1, Fattore2) # Se df_factors è stato creato
-
-# Trasforma in matrice per la funzione VAR (richiesta da VAR())
-factors_for_var_matrix <- as.matrix(factors_for_var)
-
-# 2.1 Selezione del ritardo ottimale (p)
-# La funzione VARselect usa criteri come AIC/BIC
-select_lag <- VARselect(factors_for_var_matrix, lag.max = 10, type = "const")
-print(select_lag$selection) 
-
-# 2.2 Esecuzione del modello VAR(p)
-# Usiamo il lag suggerito dal BIC (terza riga) o scegli un valore ragionevole (es. p=2)
-p_optimal <- select_lag$selection[3] 
-# Se il BIC suggerisce un valore troppo alto, potresti volerlo limitare (es. max 4)
-if (p_optimal > 4) { p_optimal <- 4 } 
-
-var_model <- VAR(factors_for_var_matrix, p = p_optimal, type = "const")
-
-# Stampa il riepilogo del modello
-summary(var_model)
-```
-
-```{r}
-# --- 1. Esegui la Decomposizione e l'IRF ---
-# Usiamo la decomposizione di Cholesky di default (ricorda, ordina il tuo modello!)
-# Ordine (Fattore1, Fattore2): Si assume che Fattore1 (Ciclo) influenzi Fattore2 (Fiducia) contemporaneamente.
-
-irf_results <- irf(var_model, 
-                   impulse = "Fattore1", 
-                   response = c("Fattore1", "Fattore2"), 
-                   n.ahead = 20, 
-                   boot = TRUE) # Con intervalli di confidenza
-
-# Visualizza i grafici IRF
-plot(irf_results) 
-
-# Ripeti per uno shock su Fattore2
-irf_results_2 <- irf(var_model, 
-                     impulse = "Fattore2", 
-                     response = c("Fattore1", "Fattore2"), 
-                     n.ahead = 20, 
-                     boot = TRUE)
-
-plot(irf_results_2)
-```
-
-```{r}
-# --- 2. Decomposizione della Varianza (FEVD) ---
-fevd_results <- fevd(var_model, n.ahead = 20)
-print(fevd_results)
-
-# Visualizza i grafici FEVD
-plot(fevd_results)
-```
-
-```{r}
-# Assumiamo che merged_data_1978 e df_factors siano disponibili e corretti
-
-# 1. Estrai la serie log_Sentiment dall'oggetto xts originale
-sentiment_xts <- merged_data_1978$log_Sentiment
-
-# 2. Converti il data frame dei fattori in un oggetto xts.
-# La sintassi corretta crea l'oggetto xts usando le colonne dei fattori e la colonna Date come indice.
-factors_xts <- xts(df_factors %>% select(Fattore1, Fattore2), 
-                   order.by = df_factors$Date)
-
-# 3. Unisci l'xts dei fattori con la serie Sentiment, allineando per data.
-# Questo è il passaggio chiave per l'allineamento temporale.
-favar_data_xts <- merge(factors_xts, sentiment_xts, all = FALSE) 
-
-# 4. Rinomina la colonna Sentiment (il nome originale potrebbe essere 'log_Sentiment')
-colnames(favar_data_xts)[3] <- "Sentiment"
-
-# 5. Converti in matrice per la funzione VAR
-favar_matrix <- as.matrix(favar_data_xts)
-
-# --- Prosegui con la stima del modello FAVAR ---
-
-# Seleziona il lag ottimale
-select_lag_favar <- VARselect(favar_matrix, lag.max = 8, type = "const")
-print(select_lag_favar$selection)
-
-# Stima il modello VAR esteso (FAVAR)
-p_optimal_favar <- select_lag_favar$selection[3] 
-
-favar_model <- VAR(favar_matrix, p = p_optimal_favar, type = "const")
-
-# Stampa i risultati
-summary(favar_model)
-```
-
-```{r}
-library(xts)
-library(dplyr)
-library(timetk) # Per tk_tbl e le pipeline di dplyr
-library(factoextra) # Per PCA
-library(tidyr) # Per fill()
-library(vars) # Per VAR
-library(dynlm) # Per il modello di regressione AR-X
-
-# =========================================================
-# I. PREPROCESSING (COME FORNITO DALL'UTENTE)
-# =========================================================
-
-# (Il codice di caricamento dati, trasformazione log, differenze, scaling e imputazione
-# è omesso qui per brevità ma si assume che sia stato eseguito, 
-# risultando in df_numeric_imputed e merged_data_1978)
-
-# Assumi che i seguenti oggetti siano disponibili dopo l'esecuzione del tuo codice:
-# - merged_data_1978 (xts originale)
-# - df_scaled_converted (tibble con la colonna Date)
-# - df_numeric_imputed (dataframe numerico imputato pronto per la PCA)
-
-
-# =========================================================
-# II. ANALISI DELLE COMPONENTI PRINCIPALI (PCA)
-# =========================================================
-
-# 1. Esegui la PCA sul dataframe imputato
-pca_res <- prcomp(df_numeric_imputed, scale = FALSE)
-
-# 2. Estrai i punteggi fattoriali (factor scores) per i primi k=2 fattori
-k <- 2
-factor_scores_matrix <- predict(pca_res)[, 1:k]
-
-# 3. Trasforma in data frame e rinomina
-factor_scores_df <- as.data.frame(factor_scores_matrix) %>%
-  rename(Fattore1 = PC1, Fattore2 = PC2)
-
-# 4. Allinea i fattori alla data originale
-# Ottieni l'indice temporale (Date) dal dataframe originale imputato prima della PCA
-Date_col <- df_scaled_converted %>% 
-    select(Date) %>%
-    # Filtra NA se necessario, ma dato che hai usato fill(), l'allineamento è diretto.
-    slice(2:n()) # Rimuovi la prima riga se la PCA è stata eseguita sui dati differenziati/scalati
-
-# Correggi l'allineamento: i dati dopo la PCA sono allineati ai dati imputati. 
-# Usiamo l'indice del dataframe imputato (che è un subset del df_scaled_converted)
-df_factors <- df_scaled_converted %>% 
-    # Rimuoviamo la prima riga (persa nella differenziazione/scaling)
-    slice(-1) %>% 
-    select(Date) %>%
-    bind_cols(factor_scores_df)
-
-# =========================================================
-# III. PREPARAZIONE DATI PER IL MODELLO FAVAR (Sentiment Endogeno)
-# =========================================================
-
-# 1. Estrai la serie log_Sentiment dall'oggetto xts originale e allinea     
-sentiment_xts <- merged_data_1978$log_Sentiment
-
-# 2. Converti il data frame dei fattori in un oggetto xts per l'allineamento temporale
-# L'ordine deve essere Fattore1, Fattore2, Sentiment
-factors_xts <- xts(df_factors %>% select(Fattore1, Fattore2), 
-                   order.by = df_factors$Date)
-
-# 3. Unisci i fattori con la serie Sentiment
-favar_data_xts <- merge(factors_xts, sentiment_xts, all = FALSE) 
-colnames(favar_data_xts)[3] <- "Sentiment"
-
-# 4. Rimuovi righe con NA che potrebbero essere rimaste (dopo il merge)
-favar_data_xts <- na.omit(favar_data_xts) 
-favar_matrix <- as.matrix(favar_data_xts)
-
-# =========================================================
-# IV. DIVISIONE TRAINING/TEST E STIMA FAAR (FAVAR Semplificato)
-# =========================================================
-
-# 1. Divisione della Matrice
-num_test <- 12 # Ultimi 12 mesi per il test
-N <- nrow(favar_matrix)
-train_end_index <- N - num_test
-
-favar_train <- favar_matrix[1:train_end_index, ]
-favar_test <- favar_matrix[(train_end_index + 1):N, ]
-
-# 2. Stima del Modello FAAR (Univariato) per il Forecasting
-# Modelliamo Sentiment sui lag dei Fattori e sui suoi propri lag (sui dati di training)
-favar_ts_train <- as.ts(favar_train)
-p_lag <- 2 # Utilizziamo p=2 come nel tuo precedente VAR
-
-# Modello FAAR: Sentiment come Y, Fattori e Sentiment lag come X
-model_faar <- dynlm(
-  Sentiment ~ 
-    L(Sentiment, 1:p_lag) +     # Lag del Sentiment (parte AR)
-    L(Fattore1, 1:p_lag) +      # Lag del Fattore 1
-    L(Fattore2, 1:p_lag),       # Lag del Fattore 2
-  data = favar_ts_train
+# Creiamo il dataset finale per il modello
+dataset_final <- data.frame(
+  Date = model_data$observation_date,
+  Y_Level = model_data$ln_UMCSENT,  # <--- QUI USIAMO IL LIVELLO (LOG), NON LA DIFFERENZA
+  X_matrix
 )
 
-cat("=========================================\n")
-cat(" RISULTATI MODELLO FAAR (TRAINING SET) \n")
-cat("=========================================\n")
-summary(model_faar)
+# Rimuoviamo la riga NA creata dal lag
+dataset_final <- na.omit(dataset_final)
+
+# ==============================================================================
+# 5. SPLIT TRAIN / TEST
+# ==============================================================================
+
+# Convertiamo in oggetti Time Series
+Y_ts <- ts(dataset_final$Y_Level, frequency = 12)
+X_reg <- as.matrix(dataset_final[, -c(1, 2)]) # Escludiamo Date e Y
+
+# Divisione 80/20
+n <- length(Y_ts)
+n_train <- floor(0.80 * n)
+
+train_Y <- subset(Y_ts, end = n_train)
+test_Y  <- subset(Y_ts, start = n_train + 1)
+
+train_X <- X_reg[1:n_train, ]
+test_X  <- X_reg[(n_train + 1):n, ]
+
+cat("Training set:", length(train_Y), "mesi\n")
+cat("Test set:", length(test_Y), "mesi\n")
+
+# ==============================================================================
+# 6. STIMA DEL MODELLO (ARIMAX SU LIVELLI)
+# ==============================================================================
+
+# auto.arima su Y (Livello).
+# Se Y non è stazionaria, auto.arima imposterà d=1 automaticamente.
+# Interpretazione: Delta(Y) = Beta * X_lag + ARMA_errors
+fit_level <- auto.arima(train_Y, xreg = train_X, 
+                        seasonal = FALSE, 
+                        stepwise = FALSE, 
+                        approximation = FALSE)
+
+print(summary(fit_level))
+# Controlla il parametro "d" nell'output (es. ARIMA(p,1,q))
+
+# Analisi residui
+checkresiduals(fit_level)
+
+# ==============================================================================
+# 7. PREVISIONE E GRAFICO
+# ==============================================================================
+
+# Previsione usando i regressori del test set (che sono dati t-1 noti)
+forecast_level <- forecast(fit_level, xreg = test_X)
+
+# Grafico
+# Questo grafico mostrerà il TREND del Log-Sentiment, non solo le variazioni
+autoplot(forecast_level) +
+  autolayer(test_Y, series = "Dati Reali (Test)") +
+  labs(title = "Previsione Livello Sentiment (Log) con Regressori Macro",
+       y = "Log(UMCSENT)",
+       x = "Tempo") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Calcolo accuratezza
+print(accuracy(forecast_level, test_Y))
+
+# (Opzionale) Se vuoi vedere il grafico nella scala originale (non logaritmica):
+fc_original <- exp(forecast_level$mean)
+plot(fc_original, main="Previsione Scala Originale (Index Points)")
 
 
-# =========================================================
-# V. FORECASTING OUT-OF-SAMPLE (Iterated Forecasts)
-# =========================================================
-
-# L'approccio Iterated Forecasts richiede la previsione dei Fattori prima
-# di prevedere Sentiment (come suggerito dai tuoi appunti [cite: 126, 129]).
-
-# 1. Stima del VAR sui Fattori (solo training set)
-factors_train <- favar_train[, c("Fattore1", "Fattore2")]
-var_model_train <- VAR(factors_train, p = p_lag, type = "const")
-
-# 2. Previsione dei Fattori per l'orizzonte di test
-forecast_factors <- predict(var_model_train, n.ahead = num_test)
-
-# 3. Previsione del Sentiment (Implementazione manuale delle previsioni iterate)
-
-# Estrai i coefficienti dal modello FAAR
-coefs_faar <- coef(model_faar)
-
-# Crea un vettore per memorizzare le previsioni OOS
-sentiment_oos_forecast <- numeric(num_test)
-
-# Inizializza i dati per l'iterazione: usa gli ultimi p_lag valori del training set
-# (Qui la gestione dei dati per l'iterazione è complessa e richiede una logica attenta
-# per estrarre i regressori al tempo T, T+1, ecc.)
-
-# --- Metodo Semplificato: Utilizza l'oggetto FAVAR completo e la funzione 'predict' ---
-# Questo è il modo più pulito e meno propenso ad errori per fare iterated forecasts con R.
-
-favar_full_model <- VAR(favar_train, p = p_lag, type = "const")
-favar_forecast <- predict(favar_full_model, n.ahead = num_test)
-
-# Estrai la previsione del Sentiment (Sentiment è la terza variabile)
-sentiment_oos_forecast_clean <- favar_forecast$fcst$Sentiment[, "fcst"]
-
-# 4. Valutazione OOS (MSPE)
-actual_sentiment_test <- favar_test[, "Sentiment"]
-
-# Mean Squared Prediction Error (MSPE)
-MSPE <- mean((sentiment_oos_forecast_clean - actual_sentiment_test)^2)
-
-cat("\n=========================================\n")
-cat(" VALUTAZIONE OUT-OF-SAMPLE (OOS) \n")
-cat("=========================================\n")
-cat(paste("Numero di periodi OOS (Test):", num_test, "\n"))
-cat(paste("Mean Squared Prediction Error (MSPE):", round(MSPE, 6), "\n"))
 
 ```
+
