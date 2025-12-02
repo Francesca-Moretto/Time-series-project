@@ -333,7 +333,7 @@ df_factors <- df_scaled_converted %>%
 # III. PREPARAZIONE DATI PER IL MODELLO FAVAR (Sentiment Endogeno)
 # =========================================================
 
-# 1. Estrai la serie log_Sentiment dall'oggetto xts originale e allinea
+# 1. Estrai la serie log_Sentiment dall'oggetto xts originale e allinea     
 sentiment_xts <- merged_data_1978$log_Sentiment
 
 # 2. Converti il data frame dei fattori in un oggetto xts per l'allineamento temporale
