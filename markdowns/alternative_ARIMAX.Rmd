@@ -4,10 +4,28 @@ output: html_document
 date: "2025-11-19"
 ---
 
+## 1. Uploading libraries
 ```{r}
+
 library(xts)
 library(dplyr)
-# --- FUNZIONE PER LEGGERE I CSV (UGUALE ALLA TUA) ---
+library(timetk)
+library(factoextra)
+library(tidyr)
+library(dplyr) 
+library(forecast)  
+library(tseries)   
+library(car)       
+library(ggplot2)
+library(tseries)
+library(gridExtra)
+
+```
+
+
+## 2. Preprocessing the series
+
+```{r}
 
 read_fred_csv <- function(filename, col_name) {
   path <- file.path("data", filename)
@@ -25,8 +43,6 @@ read_fred_csv <- function(filename, col_name) {
   return(xts_obj)
 }
 
-# --- 1. CARICAMENTO DELLE SERIE ---
-
 UMCSENT  <- read_fred_csv("UMCSENT.csv",  "Sentiment")
 WTISPLC  <- read_fred_csv("WTISPLC.csv",  "Oil")
 PI       <- read_fred_csv("PI.csv",       "Income")
@@ -35,27 +51,23 @@ UNRATE   <- read_fred_csv("UNRATE.csv",   "Unrate")
 INDPRO   <- read_fred_csv("INDPRO.csv",   "IndPro")
 FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
 
-# --- 2. METTI TUTTI GLI xts IN UNA LISTA ---
-
 series_list <- list(
   UMCSENT, WTISPLC, PI, CPIAUCSL,
   UNRATE, INDPRO, FEDFUNDS
 )
 
-# --- 3. FILTRA NULL (serie mancanti) ---
 series_list <- series_list[!sapply(series_list, is.null)]
 
-# --- 4. MERGE AUTOMATICO DI TUTTE LE SERIE ---
+#merging the series
 merged_data <- Reduce(function(x, y) merge(x, y, all = TRUE), series_list)
 merged_data_1978 <- merged_data["1978/"]
 nrow(merged_data_1978)
 start(merged_data_1978)
 end(merged_data_1978)
 
-# --- 5. RISULTATO FINALE ---
 head(merged_data)
 
-#---- 6. log transformation ---
+#log transformation
 merged_data_1978$log_Sentiment <- log(merged_data_1978$Sentiment)
 merged_data_1978$log_Oil       <- log(merged_data_1978$Oil)
 merged_data_1978$log_Income    <- log(merged_data_1978$Income)
@@ -72,8 +84,7 @@ merged_data_1978$d_Unrate    <- diff(merged_data_1978$Unrate)
 merged_data_1978$d_FedFunds  <- diff(merged_data_1978$FedFunds)
 head(merged_data_1978)
 
-#--- 7. scaling distributions ---
-library(timetk)
+# scaling distributions
 colonne_da_scalare <- c("log_Sentiment", "log_Oil", "log_Income", "log_CPI", "log_IndProd", "Unrate", "FedFunds")
 df_scaled_converted <- merged_data_1978 %>%
   timetk::tk_tbl(rename_index = "Date") %>% 
@@ -83,75 +94,49 @@ select(Date, log_Sentiment, log_Oil, log_Income, log_CPI, log_IndProd, Unrate, F
   
 mutate(
     across(
-      .cols = all_of(colonne_da_scalare), # Seleziona solo le colonne da scalare
-      .fns = ~as.numeric(scale(.)) # Applica la funzione scale e assicurati che sia numerico
+      .cols = all_of(colonne_da_scalare), 
+      .fns = ~as.numeric(scale(.)) 
     )
   )
-library(factoextra)
-library(tidyr)
-library(dplyr) # Necessaria per la funzione select()
 
-# 1. Crea il dataframe numerico (se non lo hai già fatto)
 df_numeric <- df_scaled_converted %>%
   select(-Date) 
 
-# 2. Esegui l'imputazione: Sostituisci NA con il valore precedente
 df_numeric_imputed <- df_numeric %>%
-  # fill() applica l'imputazione. 'everything()' indica tutte le colonne, 
-  # e '.direction = "down"' usa l'ultima osservazione valida precedente (LOCF).
   fill(everything(), .direction = "down") 
 
-# 3. Verifica i risultati: Dovrebbe essere tutto a zero
 colSums(is.na(df_numeric_imputed))
-```
 
-```{r}
-
-# --- Librerie necessarie per ARIMAX ---
-library(forecast)  # Il motore principale per auto.arima
-library(tseries)   # Per test di stazionarietà aggiuntivi
-library(car)       # Per controllare la multicollinearità (VIF)
-library(ggplot2)
-
-# 1. Convertiamo in Time Series (ts)
-# Assumiamo frequency = 12 (dati mensili) e start = 1978
 ts_data <- ts(df_numeric_imputed, start = c(1978, 1), frequency = 12)
 
-# Visualizziamo la struttura
 head(ts_data)
-```
-```{r}
 
-library(dplyr)
-library(car)
-library(forecast)
-
-# 1. Selezioniamo solo le variabili differenziate dal tuo 'merged_data_1978'
-# Assicuriamoci di prendere le colonne che hai creato nel TUO step 6
 df_diff <- merged_data_1978[, c("d_Sentiment", "d_Oil", "d_Income", "d_CPI", 
                                 "d_IndProd", "d_Unrate", "d_FedFunds")]
 
-# 2. Rimuoviamo i valori NA (la prima riga generata dal diff)
 df_diff_clean <- na.omit(df_diff)
 
-# 3. Trasformiamo in Time Series (ts) per ARIMAX
 ts_diff <- ts(df_diff_clean, start = c(1978, 2), frequency = 12)
 
 head(ts_diff)
+
 ```
 
+
+## 3. VIF Test
 ```{r}
 
-# Creiamo un modello fittizio solo per il test VIF
 lm_check_diff <- lm(d_Sentiment ~ d_Oil + d_Income + d_CPI + d_IndProd + d_Unrate + d_FedFunds, 
                     data = as.data.frame(ts_diff))
 
-# Ricalcoliamo il VIF
 vif_diff <- car::vif(lm_check_diff)
 print("--- NUOVI VIF (Sulle differenze) ---")
 print(vif_diff)
+
 ```
 
+
+## 4. Splitting training and test samples
 ```{r}
 
 n_obs_diff <- nrow(ts_diff)
@@ -160,8 +145,6 @@ split_point <- floor(0.80 * n_obs_diff)
 train_ts_diff <- window(ts_diff, end = c(time(ts_diff)[split_point]))
 test_ts_diff  <- window(ts_diff, start = c(time(ts_diff)[split_point + 1]))
 
-# Definiamo Y (Target) e X (Regressori)
-# Nota: Ora cerchiamo di prevedere la VARIAZIONE del Sentiment (d_Sentiment)
 train_y <- train_ts_diff[, "d_Sentiment"]
 train_x <- train_ts_diff[, c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
 
@@ -169,41 +152,35 @@ test_y <- test_ts_diff[, "d_Sentiment"]
 test_x <- test_ts_diff[, c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
 ```
 
+
+## 5.ACF AND PACF 
 ```{r}
+par(mfrow = c(1, 2)) 
 
-# Calcoliamo ACF e PACF sulla serie differenziata (d_Sentiment)
-par(mfrow = c(1, 2)) # Mette i grafici vicini
-
-# PACF per trovare 'p' (AR)
 pacf(ts_diff[, "d_Sentiment"], main = "PACF: Cerca il Lag 'p'")
 
-# ACF per trovare 'q' (MA)
 acf(ts_diff[, "d_Sentiment"], main = "ACF: Cerca il Lag 'q'")
 
 par(mfrow = c(1, 1))
 ```
 
 
+## 6.ARIMAX Model
 ```{r}
 
 library(forecast)
 library(dplyr)
 
-# --- 1. PREPARAZIONE DATI PER IL LOOP ---
-
-# Definiamo i nomi delle variabili esogene
+#exogenous variables
 xreg_cols <- c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
 
-# Recuperiamo l'intero dataset differenziato come matrice/ts per indicizzarlo facilmente
-# ts_diff è l'oggetto creato nello step precedente (che contiene tutte le "d_...")
 data_matrix <- ts_diff 
 
-# Parametri per la finestra mobile
-n_train <- length(train_y)          # Lunghezza finestra iniziale (fissa)
-n_total <- nrow(data_matrix)        # Totale osservazioni
-n_forecast <- n_total - n_train     # Numero di previsioni da fare
 
-# Vettore vuoto per salvare le previsioni (delle differenze)
+n_train <- length(train_y)          
+n_total <- nrow(data_matrix)        
+n_forecast <- n_total - n_train     
+
 forecasts_diff_arimax <- numeric(n_forecast)
 
 cat("Avvio Rolling Window ARIMAX...\n")
@@ -211,45 +188,32 @@ cat("Finestra Training:", n_train, "mesi.\n")
 cat("Previsioni da fare:", n_forecast, "\n")
 cat("Attendi... la ristima di auto.arima ad ogni step può richiedere tempo.\n")
 
-# --- 2. LOOP ROLLING WINDOW ---
+#Rolling window loop
 
-# Barra di avanzamento testuale
 pb <- txtProgressBar(min = 0, max = n_forecast, style = 3)
 
 for (i in 1:n_forecast) {
-  
-  # A. Definiamo gli indici della finestra corrente
-  # La finestra scorre: parte da 1, poi da 2, ecc. mantenendo la lunghezza n_train
   idx_start <- i
   idx_end   <- n_train + i - 1
-  idx_pred  <- n_train + i  # L'indice del punto da prevedere
-  
-  # B. Sottoinsieme di Training (Finestra Corrente)
+  idx_pred  <- n_train + i  
   train_subset <- data_matrix[idx_start:idx_end, ]
   
   y_train_sub <- train_subset[, "d_Sentiment"]
   x_train_sub <- train_subset[, xreg_cols]
   
-  # C. Variabili Esogene per il punto futuro (Ex-Post Forecast)
-  # Dobbiamo passargli una matrice con 1 riga e gli stessi nomi colonne
   x_future <- data_matrix[idx_pred, xreg_cols, drop = FALSE]
-  
-  # D. Stima Modello (Ristima ad ogni passo!)
-  # Usiamo tryCatch per evitare che un errore blocchi tutto il ciclo
   fit_rolling <- tryCatch({
     auto.arima(y_train_sub, 
                xreg = x_train_sub, 
                seasonal = FALSE, 
-               stepwise = TRUE,       # TRUE per velocizzare il loop
-               approximation = FALSE) # FALSE per precisione
+               stepwise = TRUE,       
+               approximation = FALSE) 
   }, error = function(e) return(NULL))
-  
-  # E. Previsione 1-step ahead
   if (!is.null(fit_rolling)) {
     fcast <- forecast(fit_rolling, xreg = x_future, h = 1)
     forecasts_diff_arimax[i] <- as.numeric(fcast$mean)
   } else {
-    forecasts_diff_arimax[i] <- NA # Gestione errore
+    forecasts_diff_arimax[i] <- NA 
   }
   
   setTxtProgressBar(pb, i)
@@ -257,31 +221,22 @@ for (i in 1:n_forecast) {
 close(pb)
 cat("\nRolling Window completata.\n")
 
-# --- 3. RICOSTRUZIONE DEI LIVELLI (LOG LEVELS) ---
 
-# Il modello ha predetto la DIFFERENZA. Dobbiamo sommarla al valore REALE precedente (t-1).
-# Formula: Log_Price_Forecast(t) = Log_Price_Actual(t-1) + Diff_Forecast(t)
-
-# Recuperiamo i dati originali (non differenziati) per prendere i livelli
-# Usiamo 'merged_data_1978' che contiene 'log_Sentiment'
-# Indici temporali del test set nel dataframe originale
+#Results as levels 
 idx_test_original <- (nrow(merged_data_1978) - n_forecast + 1):nrow(merged_data_1978)
 
-# Valori Reali (Livelli Log) del test set
 actual_log_levels <- merged_data_1978$log_Sentiment[idx_test_original]
 
-# Valori Reali del mese precedente (t-1) da usare come base
-# Nota: idx_test_original - 1 ci dà l'indice del mese prima
+
 prev_log_levels <- merged_data_1978$log_Sentiment[idx_test_original - 1]
 
-# Calcolo Previsione Livello
 forecast_log_levels_arimax <- prev_log_levels + forecasts_diff_arimax
 
-# --- 4. DATAFRAME RISULTATI E GRAFICO ---
 
-# Creiamo il dataframe
+# Dataframe with results 
+
 df_results_arimax <- data.frame(
-  Date = index(actual_log_levels), # Le date dallo xts originale
+  Date = index(actual_log_levels), 
   Actual_Log = as.numeric(actual_log_levels),
   Forecast_Log_ARIMAX = as.numeric(forecast_log_levels_arimax),
   Diff_Pred = forecasts_diff_arimax
@@ -300,7 +255,7 @@ ggplot(df_results_arimax, aes(x = Date)) +
   theme_minimal() +
   theme(legend.position = "bottom")
 
-# --- 5. VALUTAZIONE PERFORMANCE (RMSE) ---
+#RMSE Diagnostics 
 
 rmse_arimax <- sqrt(mean((df_results_arimax$Actual_Log - df_results_arimax$Forecast_Log_ARIMAX)^2, na.rm = TRUE))
 mae_arimax <- mean(abs(df_results_arimax$Actual_Log - df_results_arimax$Forecast_Log_ARIMAX), na.rm = TRUE)
@@ -309,6 +264,8 @@ cat("--- Performance ARIMAX (Rolling Window) ---\n")
 cat("RMSE (Log Scale):", round(rmse_arimax, 4), "\n")
 cat("MAE  (Log Scale):", round(mae_arimax, 4), "\n")
 ```
+
+
 
 ```{r}
 
@@ -323,9 +280,7 @@ cat("\n--- Diagnostica Strutturale (Modello su Dati Completi) ---\n")
 # A. Check Residuals Automatico (Plot completi)
 checkresiduals(fit_final_check)
 
-# B. Test di Normalità (Jarque-Bera)
-# H0: I residui sono distribuiti normalmente -> BUONO
-# H1: I residui NON sono normali -> MALE (incide sugli intervalli di confidenza)
+#Jarque-Bera Test
 res_final <- residuals(fit_final_check)
 jb_test <- jarque.bera.test(res_final)
 
@@ -336,9 +291,8 @@ if(jb_test$p.value > 0.05) {
   cat("Normalità: I residui NON sono normali (spesso accade in finanza a causa di picchi/crisi).\n")
 }
 
-# C. Test ARCH (Eteroschedasticità)
-# Controlliamo se la varianza dell'errore cambia nel tempo
-# Metodo rapido: Ljung-Box sui residui al quadrato
+# ARCH test 
+#Ljung-Box test
 arch_check <- Box.test(res_final^2, lag = 12, type = "Ljung-Box")
 
 cat("\n--- Test ARCH (Eteroschedasticità) ---\n")
@@ -348,6 +302,8 @@ if(arch_check$p.value > 0.05) {
   cat("Eteroschedasticità: La volatilità cambia nel tempo (p < 0.05). \nPotresti considerare un modello GARCH in futuro.\n")
 }
 ```
+
+
 
 ```{r}
 
