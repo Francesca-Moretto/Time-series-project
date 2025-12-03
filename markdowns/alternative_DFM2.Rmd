@@ -1,0 +1,278 @@
+---
+title: "alternative_DFM2"
+output: html_document
+date: "2025-12-02"
+---
+```{r}
+
+# alternative_ARIMAX - versione corretta per prevedere SENTIMENT usando fattori (SENTIMENT escluso dalla PCA)
+# Data: 2025-11-19 (tu la aggiorni)
+# Nota: Assumo dati mensili. Adatta frequency se diverso.
+
+library(xts); library(zoo); library(dplyr); library(tidyr)
+library(timetk); library(factoextra); library(vars); library(dynlm)
+library(lubridate)
+
+select <- dplyr::select
+mutate <- dplyr::mutate
+filter <- dplyr::filter
+arrange <- dplyr::arrange
+rename <- dplyr::rename
+
+
+# ---------------------------
+# 0. FUNZIONI UTILI
+# ---------------------------
+safe_log <- function(x){
+  x <- as.numeric(x)
+  x[x <= 0] <- NA
+  out <- log(x)
+  return(out)
+}
+
+# ---------------------------
+# 1. CARICAMENTO (usa la tua funzione read_fred_csv)
+# ---------------------------
+read_fred_csv <- function(filename, col_name) {
+  path <- file.path("data", filename)
+  if(!file.exists(path)) {
+    warning("File mancante: ", path)
+    return(NULL)
+  }
+  df <- read.csv(path, stringsAsFactors = FALSE)
+  dates <- as.Date(df[,1], tryFormats = c("%Y-%m-%d","%d/%m/%Y","%Y/%m/%d"))
+  values <- as.numeric(df[,2])
+  clean <- na.omit(data.frame(Date = dates, Value = values))
+  if(nrow(clean) == 0) return(NULL)
+  xts_obj <- xts(clean$Value, order.by = clean$Date)
+  colnames(xts_obj) <- col_name
+  return(xts_obj)
+}
+
+UMCSENT  <- read_fred_csv("UMCSENT.csv",  "Sentiment")
+WTISPLC  <- read_fred_csv("WTISPLC.csv",  "Oil")
+PI       <- read_fred_csv("PI.csv",       "Income")
+CPIAUCSL <- read_fred_csv("CPIAUCSL.csv", "CPI")
+UNRATE   <- read_fred_csv("UNRATE.csv",   "Unrate")
+INDPRO   <- read_fred_csv("INDPRO.csv",   "IndPro")
+FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
+
+series_list <- list(UMCSENT, WTISPLC, PI, CPIAUCSL, UNRATE, INDPRO, FEDFUNDS)
+series_list <- series_list[!sapply(series_list, is.null)]
+merged_data <- Reduce(function(x, y) merge(x, y, all = TRUE), series_list)
+merged_data_1978 <- merged_data["1978/"]
+rm(merged_data, series_list) # pulizia
+
+# ---------------------------
+# 2. TRASFORMAZIONI: LOG (except Sentiment will be kept as target)
+#    - Gestione dei valori <= 0
+# ---------------------------
+# Applichiamo log alle variabili che vogliamo usare come regressori / per PCA.
+# NON includere Sentiment nella PCA — lo useremo come target separato.
+merged_data_1978$log_Oil     <- safe_log(merged_data_1978$Oil)
+merged_data_1978$log_Income  <- safe_log(merged_data_1978$Income)
+merged_data_1978$log_CPI     <- safe_log(merged_data_1978$CPI)
+merged_data_1978$log_IndProd <- safe_log(as.numeric(merged_data_1978$IndPro))
+# Unrate e FedFunds le lasciamo in level (o log se preferisci) — qui uso livello e d'uso scaling dopo.
+merged_data_1978$Unrate <- as.numeric(merged_data_1978$Unrate)
+merged_data_1978$FedFunds <- as.numeric(merged_data_1978$FedFunds)
+
+# Controlli rapidi
+cat("Controllo -Inf/NA dopo log:\n")
+print(colSums(is.infinite(coredata(merged_data_1978))))
+print(colSums(is.na(coredata(merged_data_1978))))
+
+# ---------------------------
+# 3. COSTRUZIONE DATAFRAME PER PCA (ESCLUDENDO SENTIMENT)
+# ---------------------------
+# Creiamo un tibble con Date e solo le variabili che useremo per estrarre i fattori
+df_for_pca <- merged_data_1978 %>%
+  tk_tbl(rename_index = "Date") %>%
+  dplyr::select(Date,
+         log_Oil, log_Income, log_CPI, log_IndProd,
+         Unrate, FedFunds) 
+
+# Imputazione LOCF (fill down) per portare avanti valori mancanti dove sensato
+df_for_pca <- df_for_pca %>% arrange(Date) %>% fill(everything(), .direction = "down")
+
+# Rimuovi righe completamente NA (se presenti)
+df_for_pca <- df_for_pca %>% filter(if_any(-Date, ~ !is.na(.)))
+
+# Verifica
+cat("Righe per PCA:", nrow(df_for_pca), "\n")
+cat("NA per colonna (dopo fill):\n"); print(colSums(is.na(df_for_pca)))
+
+# ===========================================
+# ROLLING WINDOW FORECASTING — DFM
+# ===========================================
+
+library(dplyr)
+
+# Numero di fattori che vuoi utilizzare (es. 2)
+K <- 2
+
+# LUNGHEZZA DELLA FINESTRA (rolling window)
+# es: 120 mesi = 10 anni di dati
+window_size <- 120  
+
+# --- PREPARAZIONE sentiment_series (ALLINEATA a df_for_pca) ---
+# Assicuriamoci che esista una colonna Sentiment_target in merged_data_1978
+if(!"Sentiment_target" %in% colnames(merged_data_1978)) {
+  # se esiste log_Sentiment rimappiamo, altrimenti prendiamo Sentiment originale
+  if("log_Sentiment" %in% colnames(merged_data_1978)) {
+    # preferiamo usare il livello, non il log; prova a ricavarne una versione in livello se possibile
+    merged_data_1978$Sentiment_target <- as.numeric(coredata(merged_data_1978$Sentiment))
+  } else {
+    merged_data_1978$Sentiment_target <- as.numeric(coredata(merged_data_1978$Sentiment))
+  }
+}
+
+# Costruisco df_sent (Date + Sentiment_target)
+df_sent <- merged_data_1978 %>%
+  tk_tbl(rename_index = "Date") %>%
+  dplyr::select(Date, Sentiment_target) %>%
+  arrange(Date)
+
+# Allineo df_for_pca e df_sent su Date: inner join garantisce stesse righe e stesso ordine
+df_pca_sent <- df_for_pca %>%
+  dplyr::left_join(df_sent, by = "Date")  # left_join così manteniamo tutte le righe di df_for_pca
+
+# Controlli: NA nel sentiment
+na_count_sent <- sum(is.na(df_pca_sent$Sentiment_target))
+if(na_count_sent > 0) {
+  warning("Attenzione: trovati ", na_count_sent, " NA nella serie sentiment dopo l'allineamento.\n",
+          "Considera di imputare (fill) o rimuovere le righe corrispondenti prima del rolling forecast.")
+}
+
+# Estrai il vettore sentiment_series (numerico)
+sentiment_series <- as.numeric(df_pca_sent$Sentiment_target)
+
+# Sovrascrivo df_for_pca con la versione allineata (facoltativo ma consigliato)
+df_for_pca <- df_pca_sent %>% dplyr::select(-Sentiment_target)
+
+# Controllo lunghezza coerente
+if(length(sentiment_series) != nrow(df_for_pca)) {
+  stop("Errore: lunghezza di sentiment_series (", length(sentiment_series),
+       ") diversa dal numero di righe di df_for_pca (", nrow(df_for_pca), ").")
+}
+
+# Controllo che la rolling window sia possibile
+if(window_size >= nrow(df_for_pca)) {
+  stop("Errore: window_size >= numero di osservazioni disponibili. Riduci window_size.")
+}
+
+# Prealloca rolling_forecasts (ricrea se non è già fatto)
+rolling_forecasts <- rep(NA_real_, nrow(df_for_pca) - window_size)
+
+
+# LOOP ROLLING WINDOW
+for (i in 1:(nrow(df_for_pca) - window_size)) {
+  
+  # ---------------------------
+  # 1) definisci la finestra
+  # ---------------------------
+  window_data <- df_for_pca[i:(i + window_size - 1), ]
+  window_sent <- sentiment_series[i:(i + window_size - 1)]
+
+  # ---------------------------
+  # 2) PCA nella finestra
+  # ---------------------------
+  pca_window <- prcomp(
+    window_data %>% dplyr::select(-Date),
+    center = TRUE, scale. = TRUE
+  )
+  
+  # Prendi i primi K fattori
+  factors_window <- pca_window$x[, 1:K]
+  
+  # ---------------------------
+  # 3) Regressione sentiment ~ fattori
+  # ---------------------------
+  reg_window <- lm(window_sent ~ factors_window)
+  
+  # ---------------------------
+  # 4) Previsione 1-step ahead
+  #    Serve il nuovo valore dei fattori!
+  # --------------------------- 
+  next_data_row <- df_for_pca[i + window_size, ] %>% dplyr::select(-Date)
+
+  next_data_scaled <- scale(
+    next_data_row,
+    center = pca_window$center,
+    scale  = pca_window$scale
+  )
+
+  next_factor <- as.numeric(next_data_scaled %*% pca_window$rotation[, 1:K])
+
+  next_point <- reg_window$coefficients[1] + 
+    sum(reg_window$coefficients[-1] * next_factor)
+  
+  # Salva forecast
+  rolling_forecasts[i] <- next_point
+}
+
+# OUTPUT finale
+rolling_forecast_df <- data.frame(
+  Date = df_for_pca$Date[(window_size + 1):nrow(df_for_pca)],
+  Forecast = rolling_forecasts,
+  Actual = sentiment_series[(window_size + 1):length(sentiment_series)]
+)
+
+
+
+```
+```{r}
+
+# ===========================================
+# VALUTAZIONE E VISUALIZZAZIONE
+# ===========================================
+
+library(ggplot2)
+library(Metrics) # per RMSE e MAE
+
+# Residui
+rolling_forecast_df$Residual <- rolling_forecast_df$Actual - rolling_forecast_df$Forecast
+
+# RMSE e MAE
+rmse_val <- rmse(rolling_forecast_df$Actual, rolling_forecast_df$Forecast)
+mae_val  <- mae(rolling_forecast_df$Actual, rolling_forecast_df$Forecast)
+cat("\n=========================\n")
+cat("RMSE:", round(rmse_val, 6), "\n")
+cat("MAE: ", round(mae_val, 6), "\n")
+cat("=========================\n")
+
+# Plot forecast vs actual
+p1 <- ggplot(rolling_forecast_df, aes(x = Date)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "Rolling Forecast - DFM", y = "Sentiment", x = "Date") +
+  scale_color_manual("", values = c("Actual" = "blue", "Forecast" = "red")) +
+  theme_minimal()
+print(p1)
+
+# Plot residui
+p2 <- ggplot(rolling_forecast_df, aes(x = Date, y = Residual)) +
+  geom_line(color = "purple") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residuals of Rolling Forecast", y = "Residual", x = "Date") +
+  theme_minimal()
+print(p2)
+
+# Histogram residui
+p3 <- ggplot(rolling_forecast_df, aes(x = Residual)) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of Residuals", x = "Residual", y = "Count") +
+  theme_minimal()
+print(p3)
+
+# ACF residui
+acf_resid <- acf(rolling_forecast_df$Residual, main = "ACF of Residuals", lag.max = 36)
+
+# Se vuoi RMSE su scala originale (non log)
+# predicted_level <- exp(rolling_forecast_df$Forecast)
+# actual_level    <- exp(rolling_forecast_df$Actual)
+# rmse_level <- rmse(actual_level, predicted_level)
+# cat("RMSE (livello):", round(rmse_level, 6), "\n")
+
+```
+
