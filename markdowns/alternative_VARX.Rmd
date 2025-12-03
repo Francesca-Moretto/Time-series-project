@@ -186,9 +186,6 @@ optimal_p <- 12 #lag_selection_train$selection["AIC(n)"]
 cat("The model is estimated with p =", optimal_p, "lag.\n")
 
 # 2. model estimation
-# type = "const" include una costante (intercetta), standard per dati differenziati
-# Se volessi un VARX (Unemployment esogena), la sintassi cambierebbe, 
-# ma qui trattiamo entrambe come endogene (si influenzano a vicenda).
 model_var <- VAR(train_var, p = optimal_p, type = "const")
 
 # 3. results
@@ -210,31 +207,19 @@ print(roots_var)
 ```{r}
 # Residuals Diagnostics
 
-
-# A. Test di Correlazione Seriale (Portmanteau Test)
-# H0 (Null): Non c'è autocorrelazione nei residui (Il modello è BUONO)
-# H1 (Alt): C'è autocorrelazione (Il modello ha perso informazioni)
-# lags.pt = 16 è un valore standard per dati mensili (deve essere > p)
 serial_t <- serial.test(model_var, lags.pt = 16, type = "PT.asymptotic")
 print(serial_t)
 
-# Visualizzazione ACF dei residui
-# Se le barre escono dalle linee blu, c'è ancora correlazione
+# ACF Residuals
 plot(serial_t, names = "diff_log_UMCSENT") 
 
-
-# B. Test di Eteroschedasticità (ARCH Test)
-# H0: Varianza costante (Omoschedasticità) -> BUONO
-# H1: Varianza instabile (Eteroschedasticità) -> MALE
+# ARCH Test
 arch_t <- arch.test(model_var, lags.multi = 12)
 print(arch_t)
 
 
-# C. Test di Normalità (Jarque-Bera)
-# H0: I residui sono normali -> BUONO
-# H1: I residui non sono normali -> MALE
+# Normality Test
 norm_t <- normality.test(model_var, multivariate.only = FALSE)
-# Visualizziamo solo la parte relativa alla variabile target UMCSENT
 print(norm_t$jb.uni)
 ```
 
@@ -242,23 +227,20 @@ print(norm_t$jb.uni)
 
 ```{r}
 
-# 8. Test di Causalità di Granger
+# Granger Causality Test
 
-# Test A: La disoccupazione (diff_UNRATE) causa il Sentiment?
-# H0: La disoccupazione NON causa Granger il Sentiment.
-# H1: La disoccupazione CAUSA Granger il Sentiment (Utile per la predizione).
+# Test A: Does (diff_UNRATE) cause Sentiment?
+# H0: unemployment does not cause-Granger Sentiment.
+# H1: unemployment cause-Granger Sentiment.
 granger_from_unrate <- causality(model_var, cause = "diff_UNRATE")
 
-cat("--- TEST A: UNRATE aiuta a predire UMCSENT? ---\n")
+cat("does UNRATE help predict UMCSENT? ---\n")
 print(granger_from_unrate$Granger)
 
-
-# Test B: Il Sentiment (diff_log_UMCSENT) causa la Disoccupazione?
-# H0: Il Sentiment NON causa Granger la Disoccupazione.
-# H1: Il Sentiment CAUSA Granger la Disoccupazione.
+# Test B: Does Sentiment (diff_log_UMCSENT) cause Unemployment?
 granger_from_sentiment <- causality(model_var, cause = "diff_log_UMCSENT")
 
-cat("\n--- TEST B: UMCSENT aiuta a predire UNRATE? ---\n")
+cat("does UMCSENT help predict UNRATE? ---\n")
 print(granger_from_sentiment$Granger)
 ```
 
@@ -266,76 +248,49 @@ print(granger_from_sentiment$Granger)
 
 ```{r}
 
-# 9. Rolling Window Forecast (1-step ahead)
-
-# --- A. Impostazioni Iniziali ---
-# Dimensione della finestra (fissa) uguale alla lunghezza del training set originale
 window_size <- nrow(train_var) 
 total_obs <- nrow(var_data)
 test_start_index <- window_size + 1
 
-# Vettori per salvare i risultati
-forecasts_diff <- numeric() # Qui salviamo le differenze previste
+forecasts_diff <- numeric()
 actuals_diff <- var_data$diff_log_UMCSENT[test_start_index:total_obs]
 
-cat("Avvio della Rolling Window Forecasting...\n")
-cat("Finestra di training:", window_size, "mesi.\n")
-cat("Previsioni da generare:", length(actuals_diff), "\n")
+cat("Rolling Window Forecasting...\n")
+cat("Training Window:", window_size, "months.\n")
+cat("Forecasts to generate:", length(actuals_diff), "\n")
 
-# --- B. Il Ciclo Rolling (Loop) ---
-# Attenzione: questo ciclo può richiedere qualche secondo/minuto a seconda della velocità del PC
 for (i in 0:(length(actuals_diff) - 1)) {
   
-  # 1. Definiamo la finestra corrente (scorrevole)
-  # Prende sempre 'window_size' osservazioni, spostandosi di 1 ogni volta
   current_train_idx <- (1 + i):(window_size + i)
   current_data <- var_data[current_train_idx, ]
   
-  # 2. Ristimiamo il modello VAR sulla finestra corrente
-  # Usiamo lo stesso numero di lag (optimal_p) deciso prima
-  # tryCatch gestisce eventuali errori di convergenza (raro ma possibile)
   fit_rolling <- tryCatch({
     VAR(current_data, p = optimal_p, type = "const")
   }, error = function(e) return(NULL))
   
   if (!is.null(fit_rolling)) {
-    # 3. Previsione 1 passo avanti (1-step ahead)
     pred <- predict(fit_rolling, n.ahead = 1)
-    
-    # Estraiamo il valore puntuale della previsione per UMCSENT
     fcst_value <- pred$fcst$diff_log_UMCSENT[1, "fcst"]
     forecasts_diff <- c(forecasts_diff, fcst_value)
   } else {
-    forecasts_diff <- c(forecasts_diff, NA) # Gestione errore
+    forecasts_diff <- c(forecasts_diff, NA)
   }
 }
 
 cat("Rolling Forecast completato.\n")
 
-# --- C. Ricostruzione dei Livelli (Inverse Transformation) ---
-# Il modello ha predetto la DIFFERENZA. Dobbiamo tornare al LOG LEVEL per confrontare.
-# Formula: Log_Price_Previsto(t) = Log_Price_Reale(t-1) + Diff_Prevista(t)
-
-# Recuperiamo i valori REALI in scala Log dal dataset originale (data_multivariate)
-# Indici corrispondenti al periodo di test
 test_indices_original <- (nrow(var_data) - length(actuals_diff) + 1):nrow(var_data)
-# Nota: +1 perché var_data partiva dalla riga 2 (causa diff)
 
-# Valori Log Reali (per confronto)
-actual_log_levels <- data_multivariate$log_UMCSENT[test_indices_original + 1] # +1 per allineamento diff
-# Valore precedente al primo punto del test (base di partenza)
+
+actual_log_levels <- data_multivariate$log_UMCSENT[test_indices_original + 1]
 last_train_log_level <- data_multivariate$log_UMCSENT[test_indices_original[1]]
 
-# Ricostruzione Vettore Previsioni
 forecast_log_levels <- numeric(length(forecasts_diff))
 prev_value <- last_train_log_level
 
-# Per la rolling window 1-step, la base è sempre l'osservazione REALE precedente
-# (perché ogni mese conosciamo il dato vero del mese prima)
 actual_logs_shifted <- data_multivariate$log_UMCSENT[test_indices_original] # t-1
 forecast_log_levels <- actual_logs_shifted + forecasts_diff
 
-# --- D. Creazione Dataframe Finale per Confronto ---
 df_results <- data.frame(
   Date = data_multivariate$observation_date[test_indices_original + 1],
   Actual_Log = actual_log_levels,
@@ -350,11 +305,11 @@ head(df_results)
 
 ```{r}
 
-# --- Grafico: Actual vs Forecast ---
+# Actual vs Forecast
 ggplot(df_results, aes(x = Date)) +
-  geom_line(aes(y = Actual_Log, color = "Dati Reali"), size = 1) +
+  geom_line(aes(y = Actual_Log, color = "Actual Data"), size = 1) +
   geom_line(aes(y = Forecast_Log_VAR, color = "VAR Forecast (Rolling)"), size = 0.8, linetype = "dashed") +
-  labs(title = "Previsione VAR vs Dati Reali (Log Scale)",
+  labs(title = "VAR vs Actual data (in logs)",
        subtitle = paste("Rolling Window 1-step ahead | RMSE:", round(rmse_var, 4)),
        y = "Log(Consumer Sentiment)",
        color = "Legenda") +
