@@ -170,18 +170,113 @@ test_x <- test_ts_diff[, c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate"
 ```
 
 ```{r}
+# Assumiamo che tu abbia già fatto lo split 80/20
+# train_y contiene solo la prima parte della serie differenziata (d_Sentiment)
 
-# Calcoliamo ACF e PACF sulla serie differenziata (d_Sentiment)
-par(mfrow = c(1, 2)) # Mette i grafici vicini
+par(mfrow = c(1, 2)) # Mette i grafici uno a fianco all'altro
 
-# PACF per trovare 'p' (AR)
-pacf(ts_diff[, "d_Sentiment"], main = "PACF: Cerca il Lag 'p'")
+# 1. PACF sul Training Set -> Per decidere 'p' (AR)
+pacf(train_y, 
+     main = "PACF (Training Set)\nGuarda i lag significativi per 'p'", 
+     lag.max = 24)
 
-# ACF per trovare 'q' (MA)
-acf(ts_diff[, "d_Sentiment"], main = "ACF: Cerca il Lag 'q'")
+# 2. ACF sul Training Set -> Per decidere 'q' (MA)
+acf(train_y, 
+    main = "ACF (Training Set)\nGuarda i lag significativi per 'q'", 
+    lag.max = 24)
 
 par(mfrow = c(1, 1))
+
 ```
+```{r}
+
+library(forecast)
+library(dplyr)
+library(ggplot2)
+
+# --- CONFIGURAZIONE MANUALE ---
+my_p <- 1  # Lag Autoregressivo (suggerito dal PACF)
+my_q <- 0  # Lag Media Mobile (suggerito dall'ACF)
+# Nota: d è 0 perché stiamo usando dati già differenziati (data_matrix)
+
+# --- 1. PREPARAZIONE DATI ---
+xreg_cols <- c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
+data_matrix <- ts_diff 
+
+n_train <- length(train_y)
+n_total <- nrow(data_matrix)
+n_forecast <- n_total - n_train
+forecasts_diff_manual <- numeric(n_forecast)
+
+cat("Avvio Rolling Window con ARIMA(", my_p, ", 0, ", my_q, ")...\n")
+
+# --- 2. LOOP ROLLING WINDOW (MANUALE) ---
+
+pb <- txtProgressBar(min = 0, max = n_forecast, style = 3)
+
+for (i in 1:n_forecast) {
+  
+  # A. Indici
+  idx_start <- i
+  idx_end   <- n_train + i - 1
+  idx_pred  <- n_train + i 
+  
+  # B. Subset Training
+  train_subset <- data_matrix[idx_start:idx_end, ]
+  y_train_sub <- train_subset[, "d_Sentiment"]
+  x_train_sub <- train_subset[, xreg_cols]
+  
+  # C. Regressori Futuri
+  x_future <- data_matrix[idx_pred, xreg_cols, drop = FALSE]
+  
+  # D. Stima Modello FISSO (Arima con 'order')
+  # Usiamo Arima() invece di auto.arima()
+  fit_rolling <- tryCatch({
+    Arima(y_train_sub, 
+          order = c(my_p, 0, my_q),  # QUI IMPONIAMO I LAG
+          xreg = x_train_sub, 
+          include.mean = TRUE)       # Manteniamo la costante
+  }, error = function(e) return(NULL))
+  
+  # E. Forecast
+  if (!is.null(fit_rolling)) {
+    fcast <- forecast(fit_rolling, xreg = x_future, h = 1)
+    forecasts_diff_manual[i] <- as.numeric(fcast$mean)
+  } else {
+    forecasts_diff_manual[i] <- NA 
+  }
+  
+  setTxtProgressBar(pb, i)
+}
+close(pb)
+
+# --- 3. RICOSTRUZIONE LIVELLI ---
+idx_test_original <- (nrow(merged_data_1978) - n_forecast + 1):nrow(merged_data_1978)
+actual_log_levels <- merged_data_1978$log_Sentiment[idx_test_original]
+prev_log_levels <- merged_data_1978$log_Sentiment[idx_test_original - 1]
+
+forecast_log_levels_manual <- prev_log_levels + forecasts_diff_manual
+
+# --- 4. DATA FRAME & GRAFICO ---
+df_results_manual <- data.frame(
+  Date = index(actual_log_levels),
+  Actual_Log = as.numeric(actual_log_levels),
+  Forecast_Manual = as.numeric(forecast_log_levels_manual)
+)
+
+ggplot(df_results_manual, aes(x = Date)) +
+  geom_line(aes(y = Actual_Log, color = "Dati Reali"), size = 1) +
+  geom_line(aes(y = Forecast_Manual, color = "ARIMA Manuale"), size = 0.8, linetype = "dashed") +
+  labs(title = paste0("Rolling Forecast ARIMA(", my_p, ",0,", my_q, ")"),
+       y = "Log(Consumer Sentiment)") +
+  scale_color_manual(values = c("Dati Reali" = "black", "ARIMA Manuale" = "red")) +
+  theme_minimal() + theme(legend.position = "bottom")
+
+# --- 5. PERFORMANCE ---
+rmse_manual <- sqrt(mean((df_results_manual$Actual_Log - df_results_manual$Forecast_Manual)^2, na.rm = TRUE))
+cat("RMSE Manuale (", my_p, ",0,", my_q, "):", round(rmse_manual, 4), "\n")
+```
+
 
 
 ```{r}
