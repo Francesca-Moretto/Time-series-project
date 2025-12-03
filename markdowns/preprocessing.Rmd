@@ -147,7 +147,8 @@ ci <- 1.96 / sqrt(length(data_filtered$log_UMCSENT))
 ggplot(acf_df, aes(x = lag, y = acf)) +
   geom_hline(yintercept = 0, color = "black") + # Asse orizzontale
   geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "darkgrey") + 
-  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 1) + 
+  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 1) +
+  geom_point(size = 2, color = "black") +
   scale_x_continuous(breaks = seq(1, 25, 2), expand = c(0,0.1)) +
   labs(title = "Autocorrelation Function (ACF)", y = "ACF") +
   theme_minimal()
@@ -160,6 +161,7 @@ ggplot(pacf_df, aes(x = lag, y = pacf)) +
   geom_hline(yintercept = 0, color = "black") +
   geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "darkgrey") +
   geom_segment(aes(xend = lag, yend = 0), color = "black", size = 1) +
+  geom_point(size = 2, color = "black") +
   scale_x_continuous(breaks = seq(1, 25, 2), expand = c(0,0.1)) +
   labs(title = "Partial Autocorrelation Function (PACF)", y = "PACF") +
   theme_minimal()
@@ -212,10 +214,10 @@ kpss.test(diff_log)
 # ACF and PACF of differenced data
 par(mfrow = c(1, 2)) 
 
-# Autocorrelation Function (per stimare q - parte MA)
+# Autocorrelation Function - MA
 acf(diff_log, main = "ACF - First Difference", lag.max = 36)
 
-# Partial Autocorrelation Function (per stimare p - parte AR)
+# Partial Autocorrelation Function - AR
 pacf(diff_log, main = "PACF - First Difference", lag.max = 36)
 
 par(mfrow = c(1, 1))
@@ -238,103 +240,53 @@ pacf_table <- data.frame(
 )
 print(pacf_table)
 
-# ACF and PACF
+# ACF
 
 library(ggplot2)
 library(gridExtra) 
 
-# --- 1. Preparazione dei Dati ---
-
-# IMPORTANTE: La funzione diff() crea dei valori NA all'inizio. 
-# Dobbiamo rimuoverli per calcolare correttamente la lunghezza N e i grafici.
 diff_data_clean <- na.omit(diff_log)
 
-# Calcolo della soglia di significatività (Intervallo di Confidenza 95%)
 n_obs <- length(diff_data_clean)
 ci_threshold <- 1.96 / sqrt(n_obs)
 
-# --- 2. Calcolo ACF ---
-
-# Calcoliamo i valori senza fare il grafico
 acf_obj <- acf(diff_data_clean, lag.max = 36, plot = FALSE)
 
-# Creiamo il dataframe per ggplot
-# NOTA: Rimuoviamo il primo valore [-1] perché è il Lag 0, che ha sempre 
-# correlazione 1 e spesso distorce visivamente il grafico.
 acf_df <- data.frame(
   lag = acf_obj$lag[-1], 
   acf_value = acf_obj$acf[-1]
 )
 
-# Costruzione del grafico ACF
 plot_acf <- ggplot(acf_df, aes(x = lag, y = acf_value)) +
-  # Linea orizzontale dello zero
   geom_hline(yintercept = 0, color = "black") +
-  # Linee di confidenza tratteggiate blu
   geom_hline(yintercept = c(-ci_threshold, ci_threshold), linetype = "dashed", color = "blue") +
-  # Le "stanghette" verticali (lollipop stems)
   geom_segment(aes(xend = lag, yend = 0), color = "black", size = 0.7) +
-  # (Opzionale) Aggiungi un punto in cima alla stanghetta
-  # geom_point(size = 2, color = "black") + 
-  scale_x_continuous(breaks = seq(0, 36, 4)) + # Etichette asse X ogni 4 lag
+  geom_point(size = 2, color = "black") + 
+  scale_x_continuous(breaks = seq(0, 36, 4)) +
   labs(title = "ACF - First Difference", y = "ACF", x = "Lag") +
   theme_minimal()
 
-# --- 3. Calcolo PACF ---
-
-# Calcoliamo i valori senza fare il grafico
+# PACF
 pacf_obj <- pacf(diff_data_clean, lag.max = 36, plot = FALSE)
 
-# Creiamo il dataframe per ggplot
-# Il PACF solitamente parte già dal Lag 1, quindi prendiamo tutto.
 pacf_df <- data.frame(
   lag = pacf_obj$lag, 
   pacf_value = pacf_obj$acf
 )
 
-# Costruzione del grafico PACF (struttura identica all'ACF)
 plot_pacf <- ggplot(pacf_df, aes(x = lag, y = pacf_value)) +
   geom_hline(yintercept = 0, color = "black") +
   geom_hline(yintercept = c(-ci_threshold, ci_threshold), linetype = "dashed", color = "blue") +
   geom_segment(aes(xend = lag, yend = 0), color = "black", size = 0.7) +
+  geom_point(size = 2, color = "black") + 
   scale_x_continuous(breaks = seq(0, 36, 4)) +
   labs(title = "PACF - First Difference", y = "PACF", x = "Lag") +
   theme_minimal()
 
-# --- 4. Visualizzazione Combinata ---
-
-# Usiamo grid.arrange per metterli uno accanto all'altro (ncol = 2)
-# Questo sostituisce par(mfrow = c(1, 2))
 grid.arrange(plot_acf, plot_pacf, ncol = 2)
 
 
 ```
-
-**1. General Interpretation**
-
-The most striking feature of both tables is that **Lag 1 is statistically insignificant** (approx 0.03), while **Lag 2 is significant** (approx -0.17).
-
--   **Absence of Short-Term Memory:** The fact that Lag 1 is near zero in both ACF and PACF means the series does not depend on the immediately preceding month.
-
--   **Lag 2 Dependency:** The significant negative spike at Lag 2 in both functions suggests a specific 2-period relationship.
-
-Because the ACF and PACF look somewhat similar (both have a spike at Lag 2 and are otherwise quiet), it indicates a process that can be modeled effectively by either pure AR or pure MA terms, provided they reach the second lag.
-
-**2. Best Possible Models (Candidates)**
-
-Based on the standard identification rules (Box-Jenkins methodology), here are the top candidates:
-
-**Candidate A: ARIMA(0, 1, 2)**
-
--   **Why?** This relies on the **ACF** interpretation. The ACF shows significant activity up to Lag 2 and then largely cuts off (ignoring the minor Lag 5 noise). This suggests a Moving Average (MA) process of order $q=2$.
-
--   **Note:** Since Lag 1 is insignificant, the model will likely estimate a very small coefficient for the first MA term ($ma1 \approx 0$) and a significant one for the second ($ma2 \approx -0.17$).
-
-**Candidate B: ARIMA(2, 1, 0)**
-
--   **Why?** This relies on the **PACF** interpretation. The PACF shows significant activity at Lag 2 and then mostly cuts off (again, barring the Lag 5 spike). This suggests an AutoRegressive (AR) process of order $p=2$.
-
--   **Note:** Similar to the model above, this would likely result in a model where the $ar1$ coefficient is near zero, but $ar2$ is significant.
 
 ## 8. Training and Test sets
 
