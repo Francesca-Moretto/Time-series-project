@@ -1,0 +1,748 @@
+---
+title: "alternative_DFM3"
+output: html_document
+date: "2025-12-03"
+---
+
+```{r}
+
+library(tidyverse)
+library(lubridate)
+library(readr)
+
+# UMCSENT
+target_raw <- read.csv("data/UMCSENT.csv")
+target_raw$observation_date <- as.Date(target_raw$observation_date) 
+
+target_clean <- target_raw %>%
+  filter(observation_date >= "1978-01-01") %>%
+  dplyr::select(observation_date, UMCSENT) %>%
+  mutate(observation_date = floor_date(observation_date, "month")) 
+
+
+# MD file
+filename_fred <- "data/2025-10-MD.csv" 
+
+header_names <- names(read_csv(filename_fred, n_max = 0))
+transf_codes <- read_csv(filename_fred, n_max = 1, skip = 1, col_names = FALSE)
+colnames(transf_codes) <- header_names
+transf_codes <- transf_codes %>% dplyr::select(-sasdate)
+
+fred_raw <- read_csv(filename_fred, 
+                     skip = 2, 
+                     col_names = header_names,
+                     col_types = cols(sasdate = col_character())) 
+
+
+fred_raw <- fred_raw %>%
+  mutate(sasdate = as.Date(sasdate, format = "%m/%d/%Y")) %>% 
+  filter(!is.na(sasdate)) %>% 
+  mutate(sasdate = floor_date(sasdate, "month"))
+
+data_aligned <- inner_join(target_clean, fred_raw, by = c("observation_date" = "sasdate"))
+
+
+cat("Aligned Dataset:\n")
+cat("Rows:", nrow(data_aligned), "\n")
+cat("Range Date:", as.character(min(data_aligned$observation_date)), "-", as.character(max(data_aligned$observation_date)), "\n")
+
+saveRDS(transf_codes, "transf_codes.rds")
+
+head(data_aligned[, 1:5])
+```
+
+```{r}
+
+# --- PASSAGGIO 2 CORRETTO: PREPROCESSING SMART ---
+
+library(tidyverse)
+library(zoo) # Utile per gestire le serie temporali
+
+# Carichiamo i dati
+if(!exists("data_aligned")) data_aligned <- readRDS("data_aligned.rds")
+if(!exists("transf_codes")) transf_codes <- readRDS("transf_codes.rds")
+
+# 1. Funzione di trasformazione (identica a prima)
+fred_transform <- function(x, code) {
+  if(is.na(code)) return(x)
+  n <- length(x)
+  out <- rep(NA, n)
+  tryCatch({
+    if(code == 1) { out <- x } 
+    else if(code == 2) { out <- c(NA, diff(x)) } 
+    else if(code == 3) { out <- c(NA, NA, diff(x, differences = 2)) } 
+    else if(code == 4) { out <- log(x) } 
+    else if(code == 5) { out <- c(NA, diff(log(x))) } 
+    else if(code == 6) { out <- c(NA, NA, diff(log(x), differences = 2)) } 
+    else if(code == 7) { 
+      pct_change <- (x[2:n] / x[1:(n-1)]) - 1
+      out <- c(NA, NA, diff(pct_change)) 
+    }
+  }, error = function(e) { return(rep(NA, n)) })
+  return(out)
+}
+
+# 2. Applicazione trasformazioni
+dates_vec <- data_aligned$observation_date
+target_vec <- data_aligned$UMCSENT
+fred_vars <- data_aligned %>% dplyr::select(any_of(names(transf_codes))) 
+
+X_transf <- fred_vars
+for(col_name in names(fred_vars)) {
+  code <- as.numeric(transf_codes[[col_name]])
+  X_transf[[col_name]] <- fred_transform(fred_vars[[col_name]], code)
+}
+
+y_stationary <- c(NA, diff(log(target_vec)))
+final_df <- cbind(X_transf, Y_STAT = y_stationary)
+
+# 3. GESTIONE INTELLIGENTE DEI MISSING VALUES (La parte nuova)
+
+# A. Rimuoviamo le prime 2 righe (perse per le differenze)
+final_df <- final_df[3:nrow(final_df), ]
+dates_vec <- dates_vec[3:length(dates_vec)]
+
+# B. "Ragged Edge": Controlliamo la fine del dataset
+# Contiamo quanti NA ci sono per ogni riga (mese)
+na_count_by_row <- rowSums(is.na(final_df))
+
+# Mostriamo la situazione degli ultimi 6 mesi
+tail_stats <- data.frame(
+  Date = tail(dates_vec, 6),
+  Missing_Vars = tail(na_count_by_row, 6)
+)
+print("Dati mancanti negli ultimi mesi:")
+print(tail_stats)
+
+# C. Tagliamo le righe finali se mancano troppe variabili (>20% delle variabili)
+# (Soglia arbitraria ma efficace: se mancano più di 20 variabili su 120, il mese è inutile)
+threshold <- ncol(final_df) * 0.2
+valid_rows <- which(na_count_by_row < threshold)
+
+# Manteniamo solo le righe "buone"
+final_df_trimmed <- final_df[valid_rows, ]
+final_dates <- dates_vec[valid_rows]
+
+cat("\nOsservazioni dopo il taglio temporale:", nrow(final_df_trimmed), "\n")
+cat("Ultima data valida:", as.character(max(final_dates)), "\n")
+
+# D. ORA filtriamo le colonne (variabili)
+# Rimuoviamo le colonne che hanno ANCORA dei missing (es. serie interrotte anni fa)
+vars_missing <- colSums(is.na(final_df_trimmed))
+vars_to_keep <- names(vars_missing[vars_missing == 0])
+
+X_final <- final_df_trimmed[, vars_to_keep]
+Y_final <- X_final$Y_STAT
+X_final <- X_final %>% dplyr::select(-Y_STAT)
+
+cat("\nPreprocessing completato:\n")
+cat("Variabili rimaste (colonne):", ncol(X_final), "(Target: > 80 è buono)\n")
+
+# 4. Standardizzazione
+X_scaled <- scale(X_final)
+
+# Salvataggio
+saveRDS(X_scaled, "X_scaled.rds")
+saveRDS(Y_final, "Y_final.rds")
+saveRDS(final_dates, "final_dates.rds")
+```
+
+
+```{r}
+
+# --- PASSAGGIO 2: PREPROCESSING E STAZIONARIETÀ ---
+
+library(tidyverse)
+
+# Se non sono già in memoria, ricarichiamo gli oggetti del Passaggio 1
+if(!exists("data_aligned")) data_aligned <- readRDS("data_aligned.rds")
+if(!exists("transf_codes")) transf_codes <- readRDS("transf_codes.rds")
+
+# 1. Definiamo la funzione di trasformazione ufficiale di FRED-MD
+# Code 1: Level (nessuna modifica)
+# Code 2: First Difference (diff)
+# Code 3: Second Difference (diff diff)
+# Code 4: Log
+# Code 5: Log First Difference (diff log) -> molto comune
+# Code 6: Log Second Difference (diff diff log)
+# Code 7: Percentage Change Difference
+
+fred_transform <- function(x, code) {
+  # Se il codice è mancante o la serie è costante, ritorna NA
+  if(is.na(code)) return(x)
+  
+  n <- length(x)
+  out <- rep(NA, n) # Inizializziamo con NA
+  
+  tryCatch({
+    if(code == 1) {
+      out <- x
+    } else if(code == 2) {
+      out <- c(NA, diff(x))
+    } else if(code == 3) {
+      out <- c(NA, NA, diff(x, differences = 2))
+    } else if(code == 4) {
+      out <- log(x)
+    } else if(code == 5) {
+      out <- c(NA, diff(log(x)))
+    } else if(code == 6) {
+      out <- c(NA, NA, diff(log(x), differences = 2))
+    } else if(code == 7) {
+      # Diff of Percentage Change: (x_t/x_{t-1} - 1) - (x_{t-1}/x_{t-2} - 1)
+      pct_change <- (x[2:n] / x[1:(n-1)]) - 1
+      out <- c(NA, NA, diff(pct_change))
+    }
+  }, error = function(e) { 
+    # In caso di errore (es. log di numeri negativi), ritorna NA
+    return(rep(NA, n)) 
+  })
+  
+  return(out)
+}
+
+# 2. Applichiamo le trasformazioni
+# Separiamo: Date, Target (UMCSENT), e Predittori (FRED)
+dates_vec <- data_aligned$observation_date
+target_vec <- data_aligned$UMCSENT
+
+# Selezioniamo solo le colonne FRED (togliendo data e target)
+# Assumiamo che le colonne FRED siano tutte quelle presenti in 'transf_codes'
+fred_vars <- data_aligned %>% 
+  dplyr::select(any_of(names(transf_codes))) 
+
+# Creiamo un dataframe vuoto per i risultati
+X_transf <- fred_vars # Copia struttura e nomi
+
+# Ciclo su ogni colonna per trasformarla
+for(col_name in names(fred_vars)) {
+  # Recuperiamo il codice di trasformazione specifico per quella variabile
+  code <- as.numeric(transf_codes[[col_name]])
+  
+  # Applichiamo la funzione
+  X_transf[[col_name]] <- fred_transform(fred_vars[[col_name]], code)
+}
+
+# 3. Creiamo anche il Target Stazionario (Diff Log UMCSENT)
+# Come avevi fatto nella tua analisi preliminare
+y_stationary <- c(NA, diff(log(target_vec)))
+
+# 4. Pulizia Finale (Handling NAs)
+# Uniamo tutto in un dataset temporaneo per allineare le cancellazioni
+final_df <- cbind(X_transf, Y_STAT = y_stationary)
+
+# A causa delle differenze seconde (code 3 e 6), le prime 2 righe sono NA. Le rimuoviamo.
+# Inoltre, rimuoviamo le ultime righe se contengono NA (a volte le macro release ritardano)
+final_df_clean <- final_df[3:nrow(final_df), ]
+final_dates <- dates_vec[3:length(dates_vec)]
+
+# Controllo aggiuntivo: Rimuoviamo colonne (variabili) che hanno ancora NA interni
+# (A volte alcune serie storiche iniziano dopo il 1978 o finiscono prima)
+vars_with_na <- colSums(is.na(final_df_clean))
+vars_to_keep <- names(vars_with_na[vars_with_na == 0])
+
+# Selezioniamo solo le colonne "pulite"
+X_final <- final_df_clean[, vars_to_keep] # Include Y_STAT per ora
+Y_final <- X_final$Y_STAT                 # Estraiamo il target
+X_final <- X_final %>% dplyr::select(-Y_STAT)    # Teniamo solo i predittori in X
+
+cat("Preprocessing completato:\n")
+cat("- Variabili rimosse per dati mancanti:", length(names(fred_vars)) - ncol(X_final), "\n")
+cat("- Dimensioni matrice predittori X:", nrow(X_final), "x", ncol(X_final), "\n")
+
+# 5. Standardizzazione (Scaling)
+# Sottrae la media e divide per la deviazione standard
+X_scaled <- scale(X_final)
+
+# Salviamo tutto per il Passaggio 3
+saveRDS(X_scaled, "X_scaled.rds")
+saveRDS(Y_final, "Y_final.rds")
+saveRDS(final_dates, "final_dates.rds")
+
+# Visualizziamo una porzione
+head(X_scaled[, 1:6])
+
+```
+
+```{r}
+
+# --- PASSAGGIO 3: ESTRAZIONE FATTORI (PCA) ---
+
+# Assicuriamoci di avere i dati
+if(!exists("X_scaled")) X_scaled <- readRDS("X_scaled.rds")
+if(!exists("final_dates")) final_dates <- readRDS("final_dates.rds")
+
+# 1. Eseguiamo la PCA (Principal Component Analysis)
+# prcomp usa la SVD (Singular Value Decomposition), molto stabile
+pca_result <- prcomp(X_scaled, center = FALSE, scale. = FALSE) 
+# Nota: mettiamo FALSE perché abbiamo già standardizzato noi i dati manualmente
+
+# 2. Scree Plot (Analisi della Varianza Spiegata)
+# Calcoliamo la varianza spiegata da ciascuna componente
+var_explained <- pca_result$sdev^2
+prop_var <- var_explained / sum(var_explained)
+cum_var <- cumsum(prop_var)
+
+# Creiamo un dataframe per il grafico
+scree_data <- data.frame(
+  Factor = 1:20, # Guardiamo solo i primi 20 fattori
+  Variance = prop_var[1:20],
+  Cumulative = cum_var[1:20]
+)
+
+library(ggplot2)
+
+# Grafico della varianza spiegata
+ggplot(scree_data, aes(x = Factor, y = Variance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_line(aes(y = Cumulative/5), color = "red", size = 1) + # Scaliamo la cumulata per vederla
+  geom_point(aes(y = Cumulative/5), color = "red") +
+  scale_y_continuous(sec.axis = sec_axis(~.*5, name = "Cumulative Variance Explained")) +
+  labs(title = "Scree Plot: Variance Explained by Factors",
+       subtitle = "Barre blu = Varianza singolo fattore | Linea rossa = Varianza cumulata",
+       y = "Proportion of Variance",
+       x = "Factor Number") +
+  theme_minimal()
+
+# Stampa dei numeri esatti
+cat("Varianza spiegata dai primi fattori:\n")
+print(round(head(cum_var, 10) * 100, 2)) # In percentuale
+
+# 3. Estrazione dei Fattori
+# Supponiamo di sceglierne 3 o 4 (puoi cambiarlo dopo aver visto il grafico)
+num_factors <- 4 
+factors_hat <- pca_result$x[, 1:num_factors]
+
+# Creiamo un dataframe con le date per visualizzarli
+factors_df <- data.frame(Date = final_dates, factors_hat)
+colnames(factors_df) <- c("Date", paste0("F", 1:num_factors))
+
+# 4. Visualizziamo il primo fattore (spesso il 'Ciclo Economico')
+ggplot(factors_df, aes(x = Date, y = F1)) +
+  geom_line(color = "darkgreen") +
+  labs(title = "Andamento del Primo Fattore Latente (F1)",
+       subtitle = "Rappresenta spesso l'andamento generale dell'economia reale",
+       y = "Value", x = "Year") +
+  theme_minimal()
+
+# Salviamo i fattori estratti
+saveRDS(factors_df, "factors_extracted.rds")
+```
+
+
+
+
+```{r}
+# # --- PASSAGGIO 4 (DEFINITIVO): DIRECT FORECAST CON SELEZIONE AUTOMATICA DEI LAG ---
+# 
+# library(tidyverse)
+# library(forecast)
+# library(MASS) # Serve per la funzione stepAIC
+# 
+# # 1. Caricamento e Preparazione
+# if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
+# if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
+# 
+# df_base <- factors_df %>% mutate(Target = Y_final)
+# 
+# # 2. Parametri
+# h_step <- 1  # Orizzonte di previsione (es. 1 mese avanti)
+# max_lag <- 2 # Quanti lag indietro vogliamo testare come candidati? (es. t, t-1, t-2)
+# 
+# cat("Direct Forecast (h =", h_step, ") con selezione automatica dei Lag (max lag =", max_lag, ")\n")
+# 
+# # 3. Creazione del Dataset con TUTTI i possibili candidati
+# # Vogliamo prevedere Y(t+h) usando F(t), F(t-1)... Y(t), Y(t-1)...
+# 
+# df_model <- df_base %>%
+#   mutate(
+#     Y_future = dplyr::lead(Target, h_step), # Variabile Target (t+h)
+#     
+#     # Regressori al tempo t (Oggi)
+#     Y_t  = Target,
+#     F1_t = F1, F2_t = F2, F3_t = F3, F4_t = F4,
+#     
+#     # Regressori al tempo t-1 (Ieri)
+#     Y_tm1  = dplyr::lag(Target, 1),
+#     F1_tm1 = dplyr::lag(F1, 1), F2_tm1 = dplyr::lag(F2, 1), 
+#     F3_tm1 = dplyr::lag(F3, 1), F4_tm1 = dplyr::lag(F4, 1),
+#     
+#     # Regressori al tempo t-2 (L'altro ieri - opzionale se max_lag=2)
+#     Y_tm2  = dplyr::lag(Target, 2),
+#     F1_tm2 = dplyr::lag(F1, 2), F2_tm2 = dplyr::lag(F2, 2), 
+#     F3_tm2 = dplyr::lag(F3, 2), F4_tm2 = dplyr::lag(F4, 2)
+#   ) %>%
+#   na.omit()
+# 
+# # 4. Split Train/Test
+# nrows <- nrow(df_model)
+# split_idx <- floor(0.80 * nrows)
+# train_set <- df_model[1:split_idx, ]
+# test_set  <- df_model[(split_idx + 1):nrows, ]
+# 
+# # 5. Selezione Automatica del Modello (Stepwise AIC)
+# # Partiamo dal modello completo (con tutte le variabili create sopra)
+# full_model <- lm(Y_future ~ ., data = train_set %>% dplyr::select(-Date))
+# 
+# # Usiamo stepAIC per togliere le variabili inutili
+# # direction="backward" significa: parti da tutto e togli quello che non serve
+# best_model <- stepAIC(full_model, direction = "backward", trace = FALSE)
+# 
+# cat("\n--- Variabili selezionate dal modello ottimale ---\n")
+# print(names(coef(best_model)))
+# cat("\n(Se vedi variabili con '_tm1' o '_tm2', significa che i Lag erano necessari!)\n")
+# 
+# summary(best_model)
+# 
+# # 6. Previsione e Confronto con Benchmark
+# preds_dfm <- predict(best_model, newdata = test_set)
+# 
+# # Benchmark AR(1) semplice (solo Y passata)
+# bench_model <- lm(Y_future ~ Y_t + Y_tm1, data = train_set)
+# preds_bench <- predict(bench_model, newdata = test_set)
+# 
+# # 7. Calcolo Errori
+# rmse_dfm <- sqrt(mean((test_set$Y_future - preds_dfm)^2))
+# rmse_bench <- sqrt(mean((test_set$Y_future - preds_bench)^2))
+# 
+# cat("\n--- Risultati Finali (RMSE) ---\n")
+# cat("Benchmark AR(1): ", round(rmse_bench, 4), "\n")
+# cat("DFM Ottimizzato: ", round(rmse_dfm, 4), "\n")
+# 
+# # Grafico
+# plot_data <- data.frame(
+#   Date = test_set$Date,
+#   Reale = test_set$Y_future,
+#   DFM = preds_dfm,
+#   Benchmark = preds_bench
+# )
+# 
+# ggplot(plot_data, aes(x = Date)) +
+#   geom_line(aes(y = Reale, color = "Reale"), size = 1, alpha = 0.5) +
+#   geom_line(aes(y = DFM, color = "DFM (Best Lag)"), size = 0.8) +
+#   scale_color_manual(values = c("Reale"="black", "DFM (Best Lag)"="red")) +
+#   labs(title = paste("Previsione UMCSENT (h =", h_step, ")"),
+#        subtitle = "Modello Direct Forecast con selezione automatica dei regressori") +
+#   theme_minimal()
+```
+
+
+```{r}
+
+# --- PASSAGGIO 4: FORECAST E RITORNO AI LIVELLI ---
+
+library(tidyverse)
+library(forecast)
+
+# 1. Recupero Dati Originali (Livelli) e Fattori
+# È fondamentale avere UMCSENT originale (non trasformato)
+if(!exists("target_clean")) target_clean <- read.csv("data/UMCSENT.csv") %>% 
+  mutate(observation_date = as.Date(observation_date)) %>% 
+  filter(observation_date >= "1978-01-01") 
+
+if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
+if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
+
+# Uniamo tutto in un unico dataframe base
+# Attenzione: Y_final (stationary) ha delle righe tagliate all'inizio.
+# Dobbiamo allineare tutto usando le date presenti in factors_df.
+df_base <- factors_df %>%
+  inner_join(target_clean, by = c("Date" = "observation_date")) %>%
+  mutate(
+    Target_Stationary = Y_final, # La serie diff-log usata per il training
+    Level_Original = UMCSENT     # Il livello originale (per il grafico finale)
+  )
+
+# Parametri
+h_step <- 1      # Previsione a 1 mese (t+1)
+p_lag  <- 1      # Ordine di lag scelto (es. quello suggerito dal BIC, metti il tuo numero)
+
+cat("Generazione previsioni e Back-Transformation per h =", h_step, "\n")
+
+# 2. Funzione Dataset Aumentata
+# Questa versione mantiene Date e Livelli per poter tornare indietro dopo
+create_lagged_matrix_levels <- function(df, h, p) {
+  
+  # Variabile Target (Y futura stazionaria)
+  y_fut <- dplyr::lead(df$Target_Stationary, h)
+  
+  # Date e Livelli Futuri (per confronto 'Reale')
+  date_fut  <- dplyr::lead(df$Date, h)
+  level_fut <- dplyr::lead(df$Level_Original, h)
+  
+  # Livello Corrente (Anchor): Il valore UMCSENT al tempo t (oggi)
+  # Ci serve per calcolare il futuro: Domani = Oggi * exp(diff_prevista)
+  level_curr <- df$Level_Original
+  
+  # Matrice Regressori (X)
+  X_mat <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4)
+  colnames(X_mat) <- paste0(colnames(X_mat), "_t")
+  
+  if(p > 0) {
+    for(lag_val in 1:p) {
+      lagged_cols <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4) %>% dplyr::lag(lag_val)
+      colnames(lagged_cols) <- paste0(c("Target_Stationary", "F1", "F2", "F3", "F4"), "_t-", lag_val)
+      X_mat <- cbind(X_mat, lagged_cols)
+    }
+  }
+  
+  # Uniamo tutto
+  data_final <- cbind(
+    Date_Target = date_fut,
+    Y_stat_future = y_fut,
+    Level_Real_Future = level_fut, # Il valore vero che vogliamo indovinare
+    Level_Anchor_t = level_curr,   # Il punto di partenza (UMCSENT al tempo t)
+    X_mat
+  )
+  
+  return(na.omit(data_final))
+}
+
+# 3. Creazione Dataset e Split
+data_modeling <- create_lagged_matrix_levels(df_base, h_step, p_lag)
+
+nrows <- nrow(data_modeling)
+split_idx <- floor(0.80 * nrows)
+
+# Train set (escludiamo colonne descrittive come Date o Levels dal fitting del modello)
+train_set <- data_modeling[1:split_idx, ]
+test_set  <- data_modeling[(split_idx + 1):nrows, ]
+
+# Definiamo le formule escludendo le colonne "di servizio"
+vars_to_exclude <- c("Date_Target", "Level_Real_Future", "Level_Anchor_t")
+predictors <- setdiff(names(train_set), c("Y_stat_future", vars_to_exclude))
+formula_lm <- as.formula(paste("Y_stat_future ~", paste(predictors, collapse = " + ")))
+
+# 4. Stima Modello (sui dati stazionari)
+final_model <- lm(formula_lm, data = train_set)
+
+# Previsione (sui dati stazionari)
+preds_stat <- predict(final_model, newdata = test_set)
+
+# 5. BACK-TRANSFORMATION (Il passaggio chiave)
+# Formula: Level_Predetto = Level_Oggi * exp(Variazione_Log_Predetta)
+# Se h > 1, la logica "Anchor" cambia leggermente, ma per h=1 è questa.
+
+test_results <- test_set %>%
+  dplyr::select(Date_Target, Level_Real_Future, Level_Anchor_t, Y_stat_future) %>%
+  mutate(
+    Pred_Stat_DiffLog = preds_stat,
+    
+    # Calcolo Livello Previsto
+    Level_Predicted = Level_Anchor_t * exp(Pred_Stat_DiffLog)
+  )
+
+# Calcolo RMSE sui Livelli
+rmse_levels <- sqrt(mean((test_results$Level_Real_Future - test_results$Level_Predicted)^2))
+cat("RMSE sui Livelli Originali:", round(rmse_levels, 2), "\n")
+
+# 6. Plot dei Risultati (Livelli)
+library(ggplot2)
+
+ggplot(test_results, aes(x = Date_Target)) +
+  # Linea Nera: Dati Reali
+  geom_line(aes(y = Level_Real_Future, color = "Dati Reali (UMCSENT)"), size = 1) +
+  # Linea Rossa: Previsione Modello
+  geom_line(aes(y = Level_Predicted, color = "Previsione DFM"), size = 0.8, linetype="dashed") +
+  
+  scale_color_manual(values = c("Dati Reali (UMCSENT)" = "black", "Previsione DFM" = "red")) +
+  labs(title = paste("Previsione UMCSENT sui Livelli (h =", h_step, ")"),
+       subtitle = paste("RMSE:", round(rmse_levels, 2)),
+       y = "Index Value", x = "Anno") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+# --- PASSAGGIO 5: DIAGNOSTICA DEI RESIDUI ---
+
+library(tseries)  # Per Jarque-Bera test
+library(lmtest)   # Per Breusch-Pagan test
+library(ggplot2)
+library(gridExtra) # Per unire i grafici
+
+# 1. Estrazione dei Residui dal modello lineare
+# Nota: Questi sono i residui sui dati differenziati (log-diff), ed è CORRETTO così.
+residui <- residuals(final_model)
+
+# 2. ANALISI GRAFICA
+
+# A. Plot dei Residui nel tempo (per vedere se "esplodono" o hanno trend)
+df_resid <- data.frame(Index = 1:length(residui), Residui = residui)
+
+p1 <- ggplot(df_resid, aes(x = Index, y = Residui)) +
+  geom_line(color = "darkblue") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Residui nel Tempo", subtitle = "Dovrebbero oscillare a caso intorno allo 0") +
+  theme_minimal()
+
+# B. Istogramma (per vedere se sembrano una Gaussiana/Normale)
+p2 <- ggplot(df_resid, aes(x = Residui)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "lightblue", color = "black") +
+  stat_function(fun = dnorm, args = list(mean = mean(residui), sd = sd(residui)), color = "red", size = 1) +
+  labs(title = "Distribuzione dei Residui", subtitle = "Confronto con curva Normale (rossa)") +
+  theme_minimal()
+
+# C. ACF Plot (Autocorrelazione) - Stile Base R è più chiaro per l'ACF
+acf(residui, main = "Autocorrelation Function (ACF) dei Residui")
+
+# Mostriamo i plot ggplot
+grid.arrange(p1, p2, ncol = 2)
+
+
+# 3. TEST STATISTICI FORMALI
+
+cat("\n--- RISULTATI TEST DIAGNOSTICI ---\n")
+
+# TEST 1: Ljung-Box (Autocorrelazione)
+# H0 (Null Hypothesis): I residui sono rumore bianco (NO autocorrelazione) -> VOGLIAMO p-value > 0.05
+# H1: C'è autocorrelazione (il modello ha perso dei pezzi)
+lb_test <- Box.test(residui, lag = 10, type = "Ljung-Box")
+cat("1. Ljung-Box Test (Autocorrelazione):\n")
+cat("   p-value =", round(lb_test$p.value, 4), "\n")
+if(lb_test$p.value > 0.05) {
+  cat("   ESITO: OTTIMO. Non c'è autocorrelazione significativa.\n")
+} else {
+  cat("   ESITO: ATTENZIONE. I residui sono ancora correlati (forse serve p_lag più alto).\n")
+}
+
+# TEST 2: Jarque-Bera (Normalità)
+# H0: I residui sono distribuiti normalmente -> VOGLIAMO p-value > 0.05
+# Nota: Nelle serie finanziarie è molto difficile passarlo (code grasse).
+jb_test <- jarque.bera.test(residui)
+cat("\n2. Jarque-Bera Test (Normalità):\n")
+cat("   p-value =", round(jb_test$p.value, 4), "\n")
+if(jb_test$p.value > 0.05) {
+  cat("   ESITO: OTTIMO. Residui Normali.\n")
+} else {
+  cat("   ESITO: NO. Residui non normali (comune in finanza, vedi 'code grasse').\n")
+}
+
+# TEST 3: Breusch-Pagan (Omoschedasticità)
+# H0: La varianza dei residui è costante (Omoschedasticità) -> VOGLIAMO p-value > 0.05
+# H1: La varianza cambia nel tempo (Eteroschedasticità)
+bp_test <- bptest(final_model)
+cat("\n3. Breusch-Pagan Test (Omoschedasticità):\n")
+cat("   p-value =", round(bp_test$p.value, 4), "\n")
+if(bp_test$p.value > 0.05) {
+  cat("   ESITO: OTTIMO. Varianza costante.\n")
+} else {
+  cat("   ESITO: ATTENZIONE. Eteroschedasticità presente (la volatilità cambia nel tempo).\n")
+}
+```
+
+
+```{r}
+# 
+# # --- PASSAGGIO 4 (ALTERNATIVA): SELEZIONE ORDINE DI LAG UNICO ---
+# 
+# library(tidyverse)
+# library(forecast)
+# 
+# # 1. Preparazione Dati
+# if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
+# if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
+# 
+# df_base <- factors_df %>% mutate(Target = Y_final)
+# 
+# # Parametri
+# h_step <- 1      # Orizzonte di previsione (es. 1 mese avanti)
+# max_p  <- 6      # Testiamo lag da 1 fino a 6 mesi indietro
+# 
+# cat("Ricerca dell'ordine di LAG unico (p) ottimale per h =", h_step, "\n")
+# 
+# # Funzione per creare il dataset con un certo numero di lag (p)
+# create_lagged_matrix <- function(df, h, p) {
+#   # Variabile dipendente (futura)
+#   y_fut <- dplyr::lead(df$Target, h)
+#   
+#   # Matrice dei regressori
+#   # Includiamo sempre il tempo t (lag 0)
+#   X_mat <- df %>% dplyr::select(Target, F1, F2, F3, F4)
+#   colnames(X_mat) <- paste0(colnames(X_mat), "_t")
+#   
+#   # Aggiungiamo i lag da 1 a p
+#   if(p > 0) {
+#     for(lag_val in 1:p) {
+#       lagged_cols <- df %>% dplyr::select(Target, F1, F2, F3, F4) %>% dplyr::lag(lag_val)
+#       colnames(lagged_cols) <- paste0(c("Target", "F1", "F2", "F3", "F4"), "_t-", lag_val)
+#       X_mat <- cbind(X_mat, lagged_cols)
+#     }
+#   }
+#   
+#   # Uniamo e puliamo NA
+#   data_final <- cbind(Y_future = y_fut, X_mat)
+#   return(na.omit(data_final))
+# }
+# 
+# # 2. Loop per calcolare AIC e BIC per ogni ordine p
+# results_table <- data.frame(Order_p = integer(), AIC = numeric(), BIC = numeric())
+# 
+# # Usiamo lo split 80% per calcolare i criteri (non si calcolano sul test set!)
+# nrows <- nrow(df_base)
+# split_idx <- floor(0.80 * nrows)
+# 
+# for(p in 0:max_p) { # Testiamo anche p=0 (solo dati correnti)
+#   
+#   # Creiamo i dati per questo ordine p
+#   data_p <- create_lagged_matrix(df_base, h_step, p)
+#   
+#   # Split Train (usiamo le date o indici coerenti)
+#   # Nota: all'aumentare di p, il dataset si accorcia all'inizio. 
+#   # Per comparabilità perfetta bisognerebbe fissare l'inizio, ma per ora semplifichiamo.
+#   train_p <- data_p[1:(split_idx - p - h_step), ] 
+#   
+#   # Stima modello
+#   fit <- lm(Y_future ~ ., data = train_p)
+#   
+#   # Salva AIC e BIC
+#   results_table <- rbind(results_table, data.frame(Order_p = p, 
+#                                                    AIC = AIC(fit), 
+#                                                    BIC = BIC(fit)))
+# }
+# 
+# print(results_table)
+# 
+# # 3. Scelta del Vincitore
+# best_p_aic <- results_table$Order_p[which.min(results_table$AIC)]
+# best_p_bic <- results_table$Order_p[which.min(results_table$BIC)]
+# 
+# cat("\n--- Risultati Selezione ---\n")
+# cat("Miglior Lag secondo AIC:", best_p_aic, "\n")
+# cat("Miglior Lag secondo BIC:", best_p_bic, "\n")
+# cat("(Nota: Il BIC è solitamente preferito perché penalizza i modelli troppo complessi)\n")
+# 
+# # Scegliamo il vincitore BIC per il modello finale
+# final_p <- best_p_bic
+# 
+# # 4. Stima e Previsione col Modello Vincitore
+# cat("\nStima del modello finale con Lag Unico p =", final_p, "\n")
+# 
+# data_final <- create_lagged_matrix(df_base, h_step, final_p)
+# train_final <- data_final[1:split_idx, ]
+# test_final  <- data_final[(split_idx + 1):nrow(data_final), ]
+# 
+# final_model <- lm(Y_future ~ ., data = train_final)
+# summary(final_model)
+# 
+# # Previsione
+# preds <- predict(final_model, newdata = test_final)
+# 
+# # Grafico
+# plot_df <- data.frame(Date = factors_df$Date[(split_idx + 1 + h_step + final_p) : nrow(factors_df)], # Allineamento date approx
+#                       Reale = test_final$Y_future,
+#                       Previsto = preds)
+# 
+# # Aggiustamento lunghezza se necessario per plot
+# plot_df <- plot_df[1:nrow(test_final), ] 
+# 
+# ggplot(plot_df, aes(x = 1:nrow(plot_df))) + # Uso indice per semplicità
+#   geom_line(aes(y = Reale, color = "Reale"), size = 0.8) +
+#   geom_line(aes(y = Previsto, color = "Previsto"), linetype = "dashed", size = 0.8) +
+#   labs(title = paste("Previsione con Lag Unico p =", final_p), 
+#        subtitle = "Selezione basata su BIC",
+#        y = "Diff Log UMCSENT", x = "Mesi nel Test Set") +
+#   theme_minimal() +
+#   scale_color_manual(values = c("Reale"="black", "Previsto"="blue"))
+```
+
