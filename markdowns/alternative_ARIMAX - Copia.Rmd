@@ -5,6 +5,7 @@ date: "2025-11-19"
 ---
 
 ## 1. Libraries upload
+
 ```{r}
 library(xts)
 library(dplyr)
@@ -111,6 +112,7 @@ head(ts_data)
 ```
 
 
+## 3.Dataset with differtiated data
 
 ```{r}
 
@@ -125,7 +127,7 @@ head(ts_diff)
 ```
 
 
-## 4.VIF Test
+## 4.VIF Test 
 ```{r}
 
 lm_check_diff <- lm(d_Sentiment ~ d_Oil + d_Income + d_CPI + d_IndProd + d_Unrate + d_FedFunds, 
@@ -137,7 +139,7 @@ print(vif_diff)
 ```
 
 
-## 5. Splitting into training and test samples 
+## 5. Splitting into training and test samples
 ```{r}
 
 n_obs_diff <- nrow(ts_diff)
@@ -173,11 +175,84 @@ par(mfrow = c(1, 1))
 
 ```
 
+## 7. AIC e BIC
+```{r}
+library(tidyr)
+library(forecast)
+library(dplyr)
 
-## 7. ARIMAX Model
+# --- IMPOSTA QUI LA TUA SERIE ---
+target_series <- train_y   # <<--- CAMBIALO SE SERVE
+
+results <- data.frame(Order = integer(),
+                      Type = character(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+for (i in 1:12) {
+  
+  # AR(p)
+  model_ar <- tryCatch(
+    Arima(target_series, order = c(i, 1, 0)),
+    error = function(e) NULL
+  )
+  
+  if (!is.null(model_ar)) {
+    results <- rbind(
+      results,
+      data.frame(Order = i,
+                 Type = "AR Model",
+                 AIC = AIC(model_ar),
+                 BIC = BIC(model_ar))
+    )
+  }
+  
+  # MA(q)
+  model_ma <- tryCatch(
+    Arima(target_series, order = c(0, 1, i)),
+    error = function(e) NULL
+  )
+  
+  if (!is.null(model_ma)) {
+    results <- rbind(
+      results,
+      data.frame(Order = i,
+                 Type = "MA Model",
+                 AIC = AIC(model_ma),
+                 BIC = BIC(model_ma))
+    )
+  }
+}
+
+# --- Debug: controlla se abbiamo risultati ---
+print(results)
+
+if (nrow(results) == 0) {
+  stop("⚠️ Nessun modello è stato stimato: la serie è sbagliata oppure costante.")
+}
+
+# --- Plot finale ---
+results_long <- pivot_longer(results, cols = c("AIC", "BIC"),
+                             names_to = "Metric", values_to = "Value")
+
+ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ Type, scales = "free_y") +
+  scale_x_continuous(breaks = 1:12) +
+  labs(title = "AIC & BIC Comparison (AR vs MA)",
+       subtitle = "ARIMA(p,1,0) e ARIMA(0,1,q)",
+       x = "Order",
+       y = "Criterion") +
+  theme_minimal()
+
+```
+
+
+## 8. ARIMAX(1,1,0) Model
 ```{r}
 
-my_p <- 1  
+my_p <- 7  
 my_q <- 0  
 
 
@@ -188,12 +263,9 @@ n_train <- length(train_y)
 n_total <- nrow(data_matrix)
 n_forecast <- n_total - n_train
 forecasts_diff_manual <- numeric(n_forecast)
-
-cat("Rolling Window with ARIMA(", my_p, ", 0, ", my_q, ")...\n")
+fit_final <- NULL
 
 #Rolling window loop
-
-pb <- txtProgressBar(min = 0, max = n_forecast, style = 3)
 
 for (i in 1:n_forecast) {
   
@@ -213,17 +285,17 @@ for (i in 1:n_forecast) {
           xreg = x_train_sub, 
           include.mean = TRUE)       
   }, error = function(e) return(NULL))
-  
+  if (!is.null(fit_rolling)) {
+    fit_final <- fit_rolling
+  }
   if (!is.null(fit_rolling)) {
     fcast <- forecast(fit_rolling, xreg = x_future, h = 1)
     forecasts_diff_manual[i] <- as.numeric(fcast$mean)
   } else {
     forecasts_diff_manual[i] <- NA 
   }
-  
-  setTxtProgressBar(pb, i)
 }
-close(pb)
+
 
 #Level results
 idx_test_original <- (nrow(merged_data_1978) - n_forecast + 1):nrow(merged_data_1978)
@@ -253,62 +325,58 @@ cat("RMSE (", my_p, ",0,", my_q, "):", round(rmse_manual, 4), "\n")
 ```
 
 
-## 8.Residual Diagnostic
+## 9.Residual Diagnostic
 ```{r}
+# Residual diagnostics
+checkresiduals(fit_final)
 
-checkresiduals(fit_final_check)
-
-#Jarque-Bera test
-res_final <- residuals(fit_final_check)
+# Jarque–Bera test (normalità)
+res_final <- residuals(fit_final)
 jb_test <- jarque.bera.test(res_final)
 
-print(jb_test)
+# ARCH test (eteroschedasticità)
+arch_test <- Box.test(res_final^2, lag = 12, type = "Ljung-Box")
 
-# C. ARCH test (Heteroskedasticity)- Ljung-Box test
-arch_check <- Box.test(res_final^2, lag = 12, type = "Ljung-Box")
+jb_test
+arch_test
+
 
 ```
 
 
-## 9.
+## 9. Diagnostics
 ```{r}
 
-# 1. Calcolo degli errori di previsione (Rolling)
-# Errore = Valore Reale - Valore Previsto
-rolling_residuals <- df_results_arimax$Actual_Log - df_results_arimax$Forecast_Log_ARIMAX
+# Residui rolling forecast
+rolling_residuals <- na.omit(df_results_manual$Actual_Log - df_results_manual$Forecast_Manual)
 
-# Rimuoviamo eventuali NA (es. il primo dato se presente)
-rolling_residuals <- na.omit(rolling_residuals)
+# --- Time Plot ---
+p1 <- ggplot(
+  data.frame(Date = df_results_manual$Date, Residui = rolling_residuals),
+  aes(x = Date, y = Residui)
+) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residui Rolling Forecast", y = "Residuo") +
+  theme_minimal()
 
-# --- A. Visualizzazione Grafica ---
-# Creiamo 3 grafici: Linea temporale, Istogramma, ACF
-
-p1 <- ggplot(data.frame(Residui = rolling_residuals, Date = df_results_arimax$Date), aes(x = Date, y = Residui)) +
-  geom_line() + geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
-  labs(title = "Time Plot Residui (Rolling)", y = "Errore") + theme_minimal()
-
+# --- Histogram + Normal fit ---
 p2 <- ggplot(data.frame(Residui = rolling_residuals), aes(x = Residui)) +
-  geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", alpha = 0.5) +
-  stat_function(fun = dnorm, args = list(mean = mean(rolling_residuals), sd = sd(rolling_residuals)), color = "red") +
-  labs(title = "Distribuzione Errori (Istogramma)", x = "Errore") + theme_minimal()
+  geom_histogram(aes(y = ..density..), bins = 30, alpha = 0.5) +
+  stat_function(fun = dnorm,
+                args = list(mean = mean(rolling_residuals),
+                            sd = sd(rolling_residuals))) +
+  labs(title = "Distribuzione dei Residui", x = "Residuo") +
+  theme_minimal()
 
-# Per l'ACF usiamo la funzione base di R perché ggplot è complesso per ACF
+# Plot combinato
 grid.arrange(p1, p2, nrow = 2)
 
-# --- B. ACF Plot (Autocorrelazione) ---
-# Se le barre superano le linee blu tratteggiate, c'è ancora informazione non catturata
-acf(rolling_residuals, main = "ACF dei Residui di Previsione (Rolling)")
+# --- ACF dei residui ---
+acf(rolling_residuals, main = "ACF Residui Rolling Forecast")
 
-# --- C. Test di Ljung-Box ---
-# H0: I residui sono rumore bianco (White Noise) -> MODELLO BUONO
-# H1: C'è autocorrelazione -> MODELLO MIGLIORABILE
+# --- Ljung-Box test ---
 lb_test <- Box.test(rolling_residuals, lag = 12, type = "Ljung-Box")
-
-print("--- Ljung-Box Test sui Residui Rolling ---")
-print(lb_test)
+lb_test
 
 ```
-
-
-
-
