@@ -252,7 +252,7 @@ ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
 ## 8. ARIMAX(1,1,0) Model
 ```{r}
 
-my_p <- 7  
+my_p <- 7   
 my_q <- 0  
 
 
