@@ -79,24 +79,6 @@ summary(ur.df(na.omit(data_multivariate$diff_UNRATE), type = "drift"))
 kpss.test(na.omit(data_multivariate$diff_UNRATE))
 ```
 
-### 1. Test Augmented Dickey-Fuller (ADF)
-
--   **Ipotesi Nulla (**$H_0$): La serie ha una radice unitaria (**NON** è stazionaria).
-
--   **Risultato:** La statistica del test (`t value` su `z.lag.1` o `test-statistic`) è **-18.431**.
-
--   **Confronto:** Questo valore è molto più negativo (a sinistra) del valore critico all'1% (**-3.43**).
-
--   **Conclusione:** **Rifiutiamo** $H_0$. Abbiamo una fortissima evidenza statistica che la serie sia stazionaria.
-
-### 2. Test KPSS
-
--   **Ipotesi Nulla (**$H_0$): La serie è **stazionaria** (Level Stationary).
-
--   **Risultato:** Il p-value è **0.1** (con avvertimento che il valore reale è ancora più alto).
-
--   **Conclusione:** Dato che il p-value è \> 0.05, **NON rifiutiamo** $H_0$. I dati supportano l'ipotesi che la serie sia stazionaria.
-
 ### 3. ACF and PACF on Differenced Data
 
 ```{r}
@@ -167,9 +149,8 @@ ggplot(df_plot, aes(x = Lag, y = Value, color = Metric, group = Metric)) +
   geom_line(size = 1) +
   geom_point(size = 2) +
   scale_x_continuous(breaks = 1:12) +
-  labs(title = "Selezione Lag Ottimale (Calcolata su Training Set)",
-       subtitle = "Cerca il punto minimo. AIC per previsione, BIC per parsimonia.",
-       y = "Valore Criterio",
+  labs(title = "Optimal lag",
+       y = "Information Criteria",
        x = "Lag Order (p)") +
   theme_minimal() +
   theme(legend.position = "bottom")
@@ -237,7 +218,7 @@ granger_from_unrate <- causality(model_var, cause = "diff_UNRATE")
 cat("does UNRATE help predict UMCSENT? ---\n")
 print(granger_from_unrate$Granger)
 
-# Test B: Does Sentiment (diff_log_UMCSENT) cause Unemployment?
+# Test B: (diff_log_UMCSENT) cause Unemployment?
 granger_from_sentiment <- causality(model_var, cause = "diff_log_UMCSENT")
 
 cat("does UMCSENT help predict UNRATE? ---\n")
@@ -326,7 +307,7 @@ ggplot(df_results, aes(x = Date)) +
 rmse_var <- sqrt(mean((df_results$Actual_Log - df_results$Forecast_Log_VAR)^2, na.rm = TRUE))
 mae_var <- mean(abs(df_results$Actual_Log - df_results$Forecast_Log_VAR), na.rm = TRUE)
 
-cat("--- Performance Modello VAR (Rolling Window) ---\n")
+cat("--- Performance Model VAR (Rolling Window) ---\n")
 cat("RMSE (Log Scale):", round(rmse_var, 4), "\n")
 cat("MAE  (Log Scale):", round(mae_var, 4), "\n")
 
