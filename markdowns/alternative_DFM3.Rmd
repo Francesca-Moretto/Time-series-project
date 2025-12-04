@@ -715,7 +715,7 @@ p1 <- ggplot(results_df, aes(x = Date, y = Residuals)) +
   labs(title = "1. Residui nel Tempo", 
        subtitle = "Idealmente: rumore bianco attorno allo 0",
        y = "Residuo", x = "Data") +
-  theme_minimal()
+  theme_minimal() 
 
 # 2. Istogramma (Distribuzione)
 # Cosa cercare: Una campana simmetrica. Code lunghe indicano eventi estremi non previsti.
