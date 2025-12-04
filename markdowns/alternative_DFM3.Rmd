@@ -146,6 +146,27 @@ saveRDS(X_scaled, "X_scaled.rds")
 saveRDS(Y_final, "Y_final.rds")
 saveRDS(final_dates, "final_dates.rds")
 ```
+```{r}
+
+# --- CORREZIONE PASSAGGIO 2: RIMOZIONE TARGET DAI PREDITTORI ---
+
+# ... (parte iniziale del codice dove carichi data_aligned) ...
+
+# 2. Selezione variabili FRED (Predittori)
+# Rimuoviamo esplicitamente UMCSENTx per evitare "Data Leakage" nei fattori
+fred_vars <- data_aligned %>% 
+  dplyr::select(any_of(names(transf_codes))) %>%
+  dplyr::select(-matches("UMCSENTx")) # <--- RIGA FONDAMENTALE AGGIUNTA
+
+# Verifica: controlliamo che non ci sia più
+if("UMCSENTx" %in% names(fred_vars)) {
+  stop("ERRORE: UMCSENTx è ancora nei predittori!")
+} else {
+  cat("Correzione applicata: UMCSENTx rimossa dal dataset dei predittori.\n")
+}
+
+# ... (prosegui con il ciclo for per le trasformazioni come prima) ...
+```
 
 
 ```{r}
@@ -330,600 +351,441 @@ saveRDS(factors_df, "factors_extracted.rds")
 
 ```{r}
 
-# --- PASSAGGIO 4 (ROBUST): RECURSIVE ROLLING FORECAST (Lag Flessibile) ---
+# --- NUOVO BLOCCO: INTERPRETAZIONE FATTORI (DA INSERIRE DOPO PASSAGGIO 3) ---
+
+library(tidyverse)
+
+# Assicuriamoci di avere i fattori e i dati originali trasformati
+if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
+if(!exists("X_scaled")) X_scaled <- readRDS("X_scaled.rds")
+
+# 1. Calcolo Correlazioni (Factor Loadings)
+# Calcoliamo la correlazione tra ogni variabile macro (X) e i 4 Fattori estratti.
+# factors_df ha la colonna Date in pos 1, quindi prendiamo dalla 2 alla 5 (F1..F4)
+cor_matrix <- cor(X_scaled, factors_df[, -1]) 
+
+# 2. Funzione per estrarre le variabili più influenti
+explain_factor <- function(factor_name, top_n=10) {
+  # Estrae la colonna di correlazioni per quel fattore
+  loadings <- cor_matrix[, factor_name]
+  
+  # Crea un dataframe ordinato per valore assoluto (le correlazioni più forti, pos o neg)
+  imp_vars <- data.frame(
+    Variable = names(loadings),
+    Correlation = loadings
+  ) %>%
+    mutate(Abs_Corr = abs(Correlation)) %>%
+    arrange(desc(Abs_Corr)) %>%
+    head(top_n)
+  
+  cat(paste("\n--------------------------------------------------\n"))
+  cat(paste(" INTERPRETAZIONE", factor_name, "\n"))
+  cat(paste("--------------------------------------------------\n"))
+  print(imp_vars[, c("Variable", "Correlation")])
+  
+  # Piccolo hint euristico basato sulla letteratura (Stock & Watson)
+  # F1 è spesso "Real Activity", F2/F3 spesso "Interest Rates" o "Inflation"
+}
+
+# 3. Esecuzione dell'analisi
+cat("Analisi delle Correlazioni Fattore-Variabile:\n")
+explain_factor("F1") 
+explain_factor("F2")
+explain_factor("F3")
+explain_factor("F4")
+
+# 4. (Opzionale) Visualizzazione Grafica dei Loadings per F1 (il più importante)
+# Spesso F1 traccia il ciclo economico (INDPRO, EMPL, ecc.)
+f1_data <- data.frame(
+  Variable = rownames(cor_matrix),
+  Correlation = cor_matrix[, "F1"]
+) %>%
+  mutate(Abs_Corr = abs(Correlation)) %>%
+  arrange(desc(Abs_Corr)) %>%
+  head(20)
+
+ggplot(f1_data, aes(x = reorder(Variable, Correlation), y = Correlation)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 20 Variabili correlate con F1",
+       subtitle = "Se le variabili sono Produzione/Lavoro, F1 = Ciclo Economico Reale",
+       x = "Variabile FRED-MD", y = "Correlazione") +
+  theme_minimal()
+```
+
+```{r}
+
+# --- NUOVO BLOCCO: SELEZIONE DEL NUMERO DI LAG (AIC/BIC) ---
+
+library(tidyverse)
+library(ggplot2)
+
+# Carichiamo i dati necessari
+if(!exists("X_scaled")) X_scaled <- readRDS("X_scaled.rds")
+if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
+if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
+
+# Parametri fissi per il test
+h_test <- 1           # Orizzonte di previsione (lo stesso che userai dopo)
+n_factors_fix <- 4    # Numero di fattori che hai deciso di usare
+max_lags_test <- 12   # Testiamo da 1 a 12 mesi di ritardo
+
+# Dataframe per salvare i risultati
+info_criteria <- data.frame(
+  Lags = 1:max_lags_test,
+  AIC = NA,
+  BIC = NA
+)
+
+# Prepariamo i dati base
+# Y deve essere allineata per la previsione a passo h
+# Usiamo tutto il dataset disponibile per questa analisi strutturale
+data_test <- data.frame(
+  Target_Lead = dplyr::lead(Y_final, h_test), # Y al tempo t+h
+  Target_Current = Y_final                    # Y al tempo t
+)
+# Aggiungiamo i fattori (già allineati al tempo t)
+factors_mat <- as.matrix(factors_df[, 2:(n_factors_fix+1)]) # Escludiamo la colonna Date
+colnames(factors_mat) <- paste0("F", 1:n_factors_fix)
+data_test <- cbind(data_test, factors_mat)
+
+# Ciclo per testare diversi p (numero di lag)
+for(p in 1:max_lags_test) {
+  
+  # Creiamo dinamicamente i lag aggiuntivi del target
+  # Modello Base: Y_{t+h} ~ F_t + Y_t
+  # Se p=2: aggiungo Y_{t-1}
+  # Se p=3: aggiungo Y_{t-1}, Y_{t-2}, etc.
+  
+  temp_df <- data_test
+  
+  # Aggiunta colonne lag
+  predictors <- paste0("F", 1:n_factors_fix) # Iniziamo con i fattori
+  predictors <- c(predictors, "Target_Current") # Aggiungiamo Y_t (Lag 1)
+  
+  if(p > 1) {
+    for(l in 1:(p-1)) {
+      col_name <- paste0("Lag_", l)
+      temp_df[[col_name]] <- dplyr::lag(temp_df$Target_Current, l)
+      predictors <- c(predictors, col_name)
+    }
+  }
+  
+  # Creiamo la formula
+  fmla <- as.formula(paste("Target_Lead ~", paste(predictors, collapse = " + ")))
+  
+  # Fit del modello lineare (lm gestisce gli NA creati dai lag rimuovendo le righe)
+  mod_temp <- lm(fmla, data = temp_df)
+  
+  # Salviamo AIC e BIC
+  info_criteria$AIC[p] <- AIC(mod_temp)
+  info_criteria$BIC[p] <- BIC(mod_temp)
+}
+
+# --- Visualizzazione ---
+
+# Trasformiamo in formato 'long' per ggplot
+info_long <- info_criteria %>%
+  pivot_longer(cols = c("AIC", "BIC"), names_to = "Metric", values_to = "Value")
+
+# Troviamo il minimo per evidenziarlo
+min_aic <- info_criteria[which.min(info_criteria$AIC), ]
+min_bic <- info_criteria[which.min(info_criteria$BIC), ]
+
+ggplot(info_long, aes(x = Lags, y = Value, color = Metric, group = Metric)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  # Evidenziamo i minimi
+  geom_point(data = filter(info_long, Metric=="AIC" & Lags==min_aic$Lags), 
+             aes(x=Lags, y=Value), color="red", size=4, shape=1) +
+  geom_point(data = filter(info_long, Metric=="BIC" & Lags==min_bic$Lags), 
+             aes(x=Lags, y=Value), color="red", size=4, shape=1) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(title = "Selezione Lag Ottimale (Model Selection)",
+       subtitle = "Il punto più basso indica il numero di lag consigliato",
+       x = "Numero di Lag (p)",
+       y = "Valore Criterio (Più basso è meglio)") +
+  scale_x_continuous(breaks = 1:max_lags_test) +
+  theme_minimal()
+
+cat("Risultati Selezione:\n")
+cat("Lag Ottimale secondo AIC:", min_aic$Lags, "\n")
+cat("Lag Ottimale secondo BIC:", min_bic$Lags, "(Consigliato per evitare overfitting)\n")
+```
+
+
+
+```{r}
+# --- PASSAGGIO 3 & 4 (SOSTITUTIVO): ROLLING WINDOW FORECAST ---
 
 library(tidyverse)
 library(forecast)
 
-# 1. Recupero Dati
-if(!exists("target_clean")) target_clean <- read.csv("data/UMCSENT.csv") %>% 
-  mutate(observation_date = as.Date(observation_date)) %>% 
-  filter(observation_date >= "1978-01-01") 
-
-if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
+# 1. Caricamento e Preparazione Dati
+if(!exists("X_final")) X_final <- readRDS("X_scaled.rds") # O X stazionario grezzo
 if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
+if(!exists("final_dates")) final_dates <- readRDS("final_dates.rds")
 
-# Unione Dataset
-df_base <- factors_df %>%
-  inner_join(target_clean, by = c("Date" = "observation_date")) %>%
-  mutate(
-    Target_Stationary = Y_final, 
-    Level_Original = UMCSENT     
-  )
+# Creiamo il dataframe unificato
+df_model <- as.data.frame(X_final)
+df_model$Target <- Y_final
+df_model$Date <- final_dates
 
-# --- PARAMETRI MODIFICABILI ---
-h_step <- 1      # Orizzonte temporale (1 mese avanti)
-p_lag  <- 1      # ORA PUOI METTERE QUALSIASI NUMERO (es. 1, 3, 6, 12)
+# 2. Parametri del Modello
+h_step <- 1        # Orizzonte di previsione
+n_factors <- 4     # Numero di fattori da estrarre
+p_lags_y <- 2      # Lag della Y nell'equazione di previsione
 
-cat("Avvio Rolling Forecast (h =", h_step, ", p =", p_lag, ")\n")
+# --- PARAMETRO ROLLING WINDOW ---
+# Definiamo la dimensione fissa della finestra.
+# Esempio: Usiamo l'80% iniziale come grandezza della finestra (es. ~30 anni se il dataset è lungo).
+# Man mano che avanziamo, scartiamo i dati vecchi.
+window_size <- floor(nrow(df_model) * 0.80) 
 
-# 2. Funzione creazione matrice (Nomi Colonne Sicuri)
-create_lagged_matrix_levels <- function(df, h, p) {
+# Indici per il loop di test
+# La prima previsione verrà fatta al tempo t = window_size
+start_test_idx <- window_size 
+vec_dates  <- df_model$Date[(start_test_idx + h_step):nrow(df_model)]
+vec_pred   <- numeric(length(vec_dates))
+vec_actual <- numeric(length(vec_dates))
+
+cat(paste0("Avvio Rolling Window Forecast...\n"))
+cat(paste0("Dimensione Finestra Fissa: ", window_size, " mesi\n"))
+cat(paste0("Orizzonte (h): ", h_step, "\n"))
+
+pb <- txtProgressBar(min = 0, max = length(vec_dates), style = 3)
+
+# --- LOOP ROLLING ---
+for(i in 1:length(vec_dates)) {
   
-  # Target Futuro
-  y_fut <- dplyr::lead(df$Target_Stationary, h)
-  date_fut  <- dplyr::lead(df$Date, h)
-  level_fut <- dplyr::lead(df$Level_Original, h)
-  level_curr <- df$Level_Original
+  # A. Definizione degli indici temporali
+  # idx_now è l'ultimo punto osservato nel training set corrente
+  idx_now <- start_test_idx + i - 1
   
-  # Matrice Regressori al tempo t
-  X_mat <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4)
-  # FIX: Usiamo "_t" semplice
-  colnames(X_mat) <- paste0(colnames(X_mat), "_t")
+  # idx_start scorre in avanti insieme a i (differenza chiave rispetto alla Recursive)
+  idx_start <- idx_now - window_size + 1
   
-  # Aggiunta Lags
-  if(p > 0) {
-    for(lag_val in 1:p) {
-      lagged_cols <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4) %>% dplyr::lag(lag_val)
-      # FIX IMPORTANTE: Usiamo "_lag" invece di "_t-" per evitare errori nella formula
-      colnames(lagged_cols) <- paste0(c("Target_Stationary", "F1", "F2", "F3", "F4"), "_lag", lag_val)
-      X_mat <- cbind(X_mat, lagged_cols)
-    }
-  }
+  # B. Estrazione della Finestra Mobile (Training Set)
+  # Prendiamo solo le righe da idx_start a idx_now
+  train_df_window <- df_model[idx_start:idx_now, ]
   
-  # Dataset Finale
-  data_final <- cbind(
-    Date_Target = date_fut,
-    Y_stat_future = y_fut,
-    Level_Real_Future = level_fut, 
-    Level_Anchor_t = level_curr,   
-    X_mat
-  )
+  train_X <- train_df_window[, 1:(ncol(df_model)-2)] # Escludi Target e Date
+  train_Y <- train_df_window$Target
   
-  return(na.omit(data_final))
-}
-
-# 3. Preparazione Matrice
-data_modeling <- create_lagged_matrix_levels(df_base, h_step, p_lag)
-
-nrows <- nrow(data_modeling)
-split_idx <- floor(0.80 * nrows) 
-
-# Costruzione Dinamica della Formula
-# Escludiamo le colonne che non sono predittori matematici
-vars_to_exclude <- c("Date_Target", "Level_Real_Future", "Level_Anchor_t", "Y_stat_future")
-predictors <- setdiff(names(data_modeling), vars_to_exclude)
-
-# Creiamo la formula come stringa e la convertiamo
-# Questo è il punto che crashava: ora con i nomi "_lag" è sicuro
-formula_str <- paste("Y_stat_future ~", paste(predictors, collapse = " + "))
-formula_lm  <- as.formula(formula_str)
-
-cat("Formula generata automaticamente con", length(predictors), "regressori.\n")
-
-# 4. LOOP DI PREVISIONE (Recursive)
-n_forecasts <- nrows - split_idx
-vec_dates   <- data_modeling$Date_Target[(split_idx + 1):nrows]
-vec_real    <- data_modeling$Level_Real_Future[(split_idx + 1):nrows]
-vec_anchor  <- data_modeling$Level_Anchor_t[(split_idx + 1):nrows]
-vec_pred_diff <- numeric(n_forecasts)
-
-cat("Elaborazione", n_forecasts, "previsioni mensili...\n")
-pb <- txtProgressBar(min = 0, max = n_forecasts, style = 3)
-
-counter <- 1
-for(i in split_idx:(nrows - 1)) {
+  # C. Standardizzazione LOCALE (Specific for Rolling)
+  # Calcoliamo media e sd SOLO su questa finestra di dati
+  means <- colMeans(train_X)
+  sds <- apply(train_X, 2, sd)
   
-  # A. Expanding Window
-  train_window <- data_modeling[1:i, ]
+  # Gestione colonne con varianza zero nella finestra corrente (es. tassi fissi per 5 anni)
+  # Se sd è 0, rimuoviamo la colonna per questo step per non rompere la PCA
+  valid_cols <- which(sds > 1e-6)
   
-  # B. Test Row
-  test_row <- data_modeling[i + 1, , drop = FALSE]
+  train_X_scaled <- scale(train_X[, valid_cols], 
+                          center = means[valid_cols], 
+                          scale = sds[valid_cols])
   
-  # C. Stima e Previsione
-  model_rolling <- lm(formula_lm, data = train_window)
-  pred_val <- predict(model_rolling, newdata = test_row)
+  # D. PCA Ricorsiva sulla Finestra
+  pca_fit <- prcomp(train_X_scaled, center = FALSE, scale. = FALSE)
   
-  # D. Salvataggio
-  vec_pred_diff[counter] <- pred_val
+  # Fattori storici nella finestra
+  factors_train <- pca_fit$x[, 1:n_factors]
   
-  counter <- counter + 1
-  setTxtProgressBar(pb, counter)
+  # E. Preparazione Regressione OLS (Direct Forecast)
+  X_reg_train <- data.frame(factors_train)
+  colnames(X_reg_train) <- paste0("F", 1:n_factors)
+  X_reg_train$LagY <- train_Y # Autoregressive part
+  
+  # Allineamento temporale per previsione a passo h
+  # X al tempo t prevede Y al tempo t+h
+  X_matrix <- X_reg_train[1:(nrow(X_reg_train)-h_step), , drop=FALSE]
+  Y_vector <- train_Y[(1+h_step):length(train_Y)]
+  
+  # Fit del modello lineare
+  mod_lm <- lm(Y_vector ~ ., data = X_matrix)
+  
+  # F. PREVISIONE (Out of Sample)
+  # Prendiamo i dati X al tempo 'idx_now' (ultimo osservato)
+  test_X_raw <- df_model[idx_now, 1:(ncol(df_model)-2)]
+  
+  # Standardizziamo usando le statistiche della FINESTRA CORRENTE (means, sds)
+  test_X_scaled <- (test_X_raw[valid_cols] - means[valid_cols]) / sds[valid_cols]
+  
+  # Proiettiamo sui Loading della PCA calcolata sulla finestra
+  factor_new <- as.matrix(test_X_scaled) %*% pca_fit$rotation[, 1:n_factors]
+  
+  # Creiamo dataset per predict
+  new_data <- data.frame(factor_new)
+  colnames(new_data) <- paste0("F", 1:n_factors)
+  new_data$LagY <- df_model$Target[idx_now] 
+  
+  # Previsione
+  pred_val <- predict(mod_lm, newdata = new_data)
+  
+  # Salvataggio risultati
+  vec_pred[i] <- pred_val
+  vec_actual[i] <- df_model$Target[idx_now + h_step]
+  
+  setTxtProgressBar(pb, i)
 }
 close(pb)
 
-# 5. RISULTATI E BACK-TRANSFORMATION
-results_rolling <- data.frame(
+# G. Valutazione Risultati
+results_df <- data.frame(
   Date = vec_dates,
-  Reale = vec_real,
-  Anchor = vec_anchor,
-  Pred_DiffLog = vec_pred_diff
-) %>%
+  Actual_Stat = vec_actual,
+  Pred_Stat = vec_pred
+)
+
+rmse <- sqrt(mean((results_df$Actual_Stat - results_df$Pred_Stat)^2, na.rm=TRUE))
+cat("\n--- ROLLING WINDOW RESULTS ---\n")
+cat("RMSE (Diff-Log scale):", round(rmse, 4), "\n")
+
+# Se vuoi vedere se è migliorato rispetto al Recursive, confronta gli RMSE.
+```
+
+```{r}
+
+# --- PASSAGGIO 5: RITORNO AI LIVELLI E DIAGNOSTICA ---
+
+# Recuperiamo il livello originale per fare la trasformazione inversa
+# Dobbiamo prendere il valore di UMCSENT al tempo t per calcolare t+1
+# Level_{t+1} = Level_{t} * exp(DiffLog_{t+1})
+
+target_raw <- read.csv("data/UMCSENT.csv") %>%
+  mutate(observation_date = as.Date(observation_date)) %>% 
+  filter(observation_date %in% results_df$Date) %>% 
+  arrange(observation_date)
+
+# Poiché abbiamo allineato le date "Target" (ovvero t+h), dobbiamo recuperare il livello al tempo t+h-1 (l'ancora)
+# Un modo semplice è usare direttamente la serie originale allineata:
+
+results_final <- results_df %>%
+  left_join(target_raw, by = c("Date" = "observation_date")) %>%
+  rename(Level_Actual = UMCSENT) 
+
+# Nota: La back-transformation esatta dipende dall'ancora (t-1).
+# Approssimazione valida per grafici:
+# Level_Pred = Level_Actual / exp(Actual_Stat) * exp(Pred_Stat)
+# (Ovvero: prendo il livello precedente implicito e applico la crescita prevista)
+
+results_final <- results_final %>%
   mutate(
-    Previsto = Anchor * exp(Pred_DiffLog)
-  )
+    # Ricostruzione: Level_Previsto = Level_Reale * exp(Errore_Previsto - Errore_Reale) ... semplifichiamo:
+    # Level_Previsto_t = Level_Reale_{t-1} * exp(Pred_Stat_t)
+    Level_Lagged = lag(Level_Actual),
+    Level_Pred   = Level_Lagged * exp(Pred_Stat)
+  ) %>%
+  filter(!is.na(Level_Pred))
 
-# Errori
-rmse_val <- sqrt(mean((results_rolling$Reale - results_rolling$Previsto)^2))
-cat("\n--- Risultati Rolling (p =", p_lag, ") ---\n")
-cat("RMSE (Livelli):", round(rmse_val, 2), "\n")
-
-# 6. PLOT
-library(ggplot2)
-ggplot(results_rolling, aes(x = Date)) +
-  geom_line(aes(y = Reale, color = "Reale"), size = 1) +
-  geom_line(aes(y = Previsto, color = "Previsione Rolling"), size = 0.8, linetype = "dashed") +
-  scale_color_manual(values = c("Reale"="black", "Previsione Rolling"="blue")) +
-  labs(title = paste("Previsione Rolling UMCSENT (Lags =", p_lag, ")"),
-       subtitle = paste("RMSE:", round(rmse_val, 2)),
-       y = "Index Value") +
+# Plot
+ggplot(results_final, aes(x = Date)) +
+  geom_line(aes(y = Level_Actual, color = "Dato Reale"), size = 1) +
+  geom_line(aes(y = Level_Pred, color = "DFM Forecast"), size = 0.8, linetype = "dashed") +
+  scale_color_manual(values = c("Dato Reale"="black", "DFM Forecast"="red")) +
+  labs(title = "UMCSENT: Dynamic Factor Model Forecast (h=1)",
+       subtitle = paste("Direct Forecast Method | RMSE (Stat):", round(rmse,4)),
+       y = "Index Level") +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
 
 ```{r}
 
-
-# --- PASSAGGIO 5 (ADATTATO): DIAGNOSTICA ERRORI DI PREVISIONE ROLLING ---
-
-library(tseries)   # Per Jarque-Bera
+library(tidyverse)
 library(ggplot2)
-library(gridExtra) # Per unire i grafici
+library(gridExtra) 
+library(tseries)   
+library(forecast)  
 
-# 1. Calcolo degli Errori di Previsione (One-Step-Ahead Forecast Errors)
-# Dobbiamo confrontare la variazione (diff-log) REALE con quella PREVISTA.
-# I "residui" qui sono gli errori che il modello ha commesso 'live' nel passato.
+# 1. Calcolo dei residui
+# Importante: Assicurati che results_df esista dal blocco precedente
+results_df$Residuals <- results_df$Actual_Stat - results_df$Pred_Stat
 
-# Ricostruiamo la variazione reale (log-diff) dai dati salvati
-real_log_diff <- log(results_rolling$Reale / results_rolling$Anchor)
-pred_log_diff <- results_rolling$Pred_DiffLog
+# Rimuoviamo eventuali NA (le prime osservazioni della rolling window)
+residuals_clean <- na.omit(results_df$Residuals)
 
-# L'errore è la differenza
-residui_rolling <- real_log_diff - pred_log_diff
+# --- A. ANALISI GRAFICA ---
 
-# Creiamo un dataframe per i grafici
-df_resid <- data.frame(
-  Date = results_rolling$Date, 
-  Residui = residui_rolling
-)
-
-# 2. ANALISI GRAFICA
-
-# A. Plot degli Errori nel tempo
-p1 <- ggplot(df_resid, aes(x = Date, y = Residui)) +
-  geom_line(color = "darkblue") +
+# 1. Plot dei residui nel tempo
+# Cosa cercare: Se vedi un trend o onde lunghe, il modello manca qualcosa.
+p1 <- ggplot(results_df, aes(x = Date, y = Residuals)) +
   geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
-  labs(title = "Errori di Previsione nel Tempo", 
-       subtitle = "Forecast Errors (Out-of-Sample)",
-       y = "Errore (Log-Diff)") +
+  geom_line(color = "steelblue") +
+  labs(title = "1. Residui nel Tempo", 
+       subtitle = "Idealmente: rumore bianco attorno allo 0",
+       y = "Residuo", x = "Data") +
   theme_minimal()
 
-# B. Istogramma (Distribuzione Errori)
-p2 <- ggplot(df_resid, aes(x = Residui)) +
-  geom_histogram(aes(y = ..density..), bins = 30, fill = "lightblue", color = "black") +
-  stat_function(fun = dnorm, args = list(mean = mean(residui_rolling), sd = sd(residui_rolling)), color = "red", size = 1) +
-  labs(title = "Distribuzione Errori", subtitle = "Confronto con Normale") +
+# 2. Istogramma (Distribuzione)
+# Cosa cercare: Una campana simmetrica. Code lunghe indicano eventi estremi non previsti.
+p2 <- ggplot(results_df, aes(x = Residuals)) +
+  # CORREZIONE: usiamo after_stat(density) invece di ..density..
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black") +
+  geom_density(color = "darkblue", size = 1) +
+  # Sovrapponiamo la normale teorica
+  stat_function(fun = dnorm, args = list(mean = mean(residuals_clean), sd = sd(residuals_clean)), 
+                color = "red", linetype = "dashed") +
+  labs(title = "2. Distribuzione dei Residui", 
+       subtitle = "Blu = Reale vs Rossa = Normale Teorica",
+       x = "Residuo", y = "Densità") +
   theme_minimal()
 
-# C. ACF Plot
-# Usiamo la funzione base di R, ma salviamo il plot in una finestra grafica separata se necessario
-# Qui usiamo ggAcf se disponibile, altrimenti base
-# Per semplicità nel grid.arrange, usiamo una versione custom o stampiamo a parte.
-# Stampiamo i grafici ggplot
-grid.arrange(p1, p2, ncol = 2)
+# 3. ACF Plot (Autocorrelazione)
+# Cosa cercare: Barre che escono dalle linee blu tratteggiate.
+# Se la barra al Lag 12 esce, hai stagionalità residua.
+p3 <- ggAcf(residuals_clean) +
+  labs(title = "3. Autocorrelazione (ACF)", 
+       subtitle = "Barre fuori dalle linee = Informazione non catturata") +
+  theme_minimal()
 
-# ACF Plot classico (esce nella console plot standard)
-acf(residui_rolling, main = "ACF degli Errori di Previsione")
+# 4. QQ Plot (Normalità code)
+# Cosa cercare: I punti devono stare sulla linea rossa.
+p4 <- ggplot(results_df, aes(sample = Residuals)) +
+  stat_qq(color = "steelblue") +
+  stat_qq_line(color = "red") +
+  labs(title = "4. Normal Q-Q Plot", 
+       subtitle = "Deviazione dalla linea rossa = Non normalità",
+       x = "Teorici", y = "Campione") +
+  theme_minimal()
+
+# Mostra i 4 grafici insieme
+grid.arrange(p1, p2, p3, p4, nrow = 2)
 
 
-# 3. TEST STATISTICI FORMALI
+# --- B. TEST STATISTICI FORMALI ---
 
-cat("\n--- RISULTATI DIAGNOSTICA ROLLING FORECAST ---\n")
+cat("\n--- DIAGNOSTICA STATISTICA ---\n")
 
-# TEST 1: Ljung-Box (Autocorrelazione degli errori)
-# Verifica se gli errori di oggi dipendono dagli errori di ieri.
-# Se p < 0.05, significa che c'è ancora informazione che potevamo sfruttare.
-lb_test <- Box.test(residui_rolling, lag = 10, type = "Ljung-Box")
+# 1. Media dei residui (Bias Test)
+bias_test <- t.test(residuals_clean)
+cat("Bias (Media):", round(mean(residuals_clean), 5), "| p-value:", round(bias_test$p.value, 4), "\n")
+if(bias_test$p.value < 0.05) cat("-> FAIL: Il modello è distorto (Media non zero).\n") else cat("-> PASS: Nessun bias significativo.\n")
 
-cat("1. Ljung-Box Test (Autocorrelazione Errori):\n")
-cat("   p-value =", round(lb_test$p.value, 4), "\n")
-if(lb_test$p.value > 0.05) {
-  cat("   ESITO: OTTIMO. Gli errori sono 'Rumore Bianco' (nessuna correlazione).\n")
+# 2. Ljung-Box Test (Autocorrelazione)
+# Lag: Usiamo 10 come standard, o log(N). 
+lb_test <- Box.test(residuals_clean, lag = 36, type = "Ljung-Box")
+cat("\nLjung-Box Test (Autocorrelazione ai primi 10 lag):\n")
+cat("p-value:", round(lb_test$p.value, 4), "\n")
+if(lb_test$p.value < 0.05) {
+  cat("-> FAIL: C'è ancora autocorrelazione nei residui.\n")
+  cat("   (Nota: Se l'RMSE è buono, questo è accettabile per il forecasting puro, ma gli intervalli di confidenza sono inaffidabili).\n")
 } else {
-  cat("   ESITO: ATTENZIONE. C'è autocorrelazione (il modello può essere migliorato).\n")
+  cat("-> PASS: Residui White Noise (Ottimo).\n")
 }
 
-# TEST 2: Jarque-Bera (Normalità)
-# Verifica se gli errori seguono una curva a campana perfetta.
-jb_test <- jarque.bera.test(residui_rolling)
+# 3. Jarque-Bera Test (Normalità)
+# Nota: Richiede libreria tseries
+jb_test <- jarque.bera.test(residuals_clean)
+cat("\nJarque-Bera Test (Normalità):\n")
+cat("p-value:", round(jb_test$p.value, 4), "\n")
+if(jb_test$p.value < 0.05) cat("-> FAIL: I residui NON sono normali (Code grasse o asimmetria).\n") else cat("-> PASS: Distribuzione Normale.\n")
 
-cat("\n2. Jarque-Bera Test (Normalità):\n")
-cat("   p-value =", round(jb_test$p.value, 4), "\n")
-if(jb_test$p.value > 0.05) {
-  cat("   ESITO: OTTIMO. Errori Normali.\n")
-} else {
-  cat("   ESITO: NO. Code grasse (comune in finanza, non invalidante per il forecast puntuale).\n")
-}
-
-# TEST 3: McLeod-Li Test (Effetto ARCH / Eteroschedasticità)
-# Controlla se la VARIANZA degli errori cambia nel tempo (volatilità clusterizzata).
-# Si fa applicando Ljung-Box sui residui al QUADRATO.
-arch_test <- Box.test(residui_rolling^2, lag = 10, type = "Ljung-Box")
-
-cat("\n3. McLeod-Li Test (Eteroschedasticità/ARCH):\n")
-cat("   p-value =", round(arch_test$p.value, 4), "\n")
-if(arch_test$p.value > 0.05) {
-  cat("   ESITO: OTTIMO. Varianza degli errori costante.\n")
-} else {
-  cat("   ESITO: ATTENZIONE. Volatilità variabile (gli errori sono più grandi in certi periodi).\n")
-}
+# 4. ARCH Test (Eteroschedasticità)
+# Testiamo se i residui al quadrato sono autocorrelati
+lb_sq_test <- Box.test(residuals_clean^2, lag = 10, type = "Ljung-Box")
+cat("\nARCH Effect (Volatilità Cluster):\n")
+cat("p-value:", round(lb_sq_test$p.value, 4), "\n")
+if(lb_sq_test$p.value < 0.05) cat("-> FAIL: Volatilità non costante nel tempo.\n") else cat("-> PASS: Volatilità costante.\n")
 ```
-
-
-
-```{r}
-# 
-# # --- PASSAGGIO 4 (DEFINITIVO): RECURSIVE ROLLING FORECAST ---
-# 
-# library(tidyverse)
-# library(forecast)
-# 
-# # 1. Recupero Dati e Preparazione
-# if(!exists("target_clean")) target_clean <- read.csv("data/UMCSENT.csv") %>% 
-#   mutate(observation_date = as.Date(observation_date)) %>% 
-#   filter(observation_date >= "1978-01-01") 
-# 
-# if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
-# if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
-# 
-# # Unione Dataset Base
-# df_base <- factors_df %>%
-#   inner_join(target_clean, by = c("Date" = "observation_date")) %>%
-#   mutate(
-#     Target_Stationary = Y_final, # Serie differenziata (per il training)
-#     Level_Original = UMCSENT     # Livello originale (per grafico e verifica)
-#   )
-# 
-# # Parametri
-# h_step <- 1      # Orizzonte temporale (1 mese avanti)
-# p_lag  <- 3      # Ordine di ritardo (Lag)
-# 
-# cat("Avvio Recursive Rolling Forecast (h =", h_step, ", p =", p_lag, ")\n")
-# 
-# # 2. Funzione creazione matrice (con Anchor per back-transformation)
-# create_lagged_matrix_levels <- function(df, h, p) {
-#   
-#   # Target Futuro (Stazionario) e Dati di verifica (Livelli/Date)
-#   y_fut <- dplyr::lead(df$Target_Stationary, h)
-#   date_fut  <- dplyr::lead(df$Date, h)
-#   level_fut <- dplyr::lead(df$Level_Original, h)
-#   
-#   # Anchor: Il livello di OGGI (t). Serve per calcolare: Domani = Oggi * exp(diff)
-#   level_curr <- df$Level_Original
-#   
-#   # Matrice Regressori (X) al tempo t
-#   X_mat <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4)
-#   colnames(X_mat) <- paste0(colnames(X_mat), "_t")
-#   
-#   # Aggiunta Lags (t-1, t-2...)
-#   if(p > 0) {
-#     for(lag_val in 1:p) {
-#       lagged_cols <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4) %>% dplyr::lag(lag_val)
-#       colnames(lagged_cols) <- paste0(c("Target_Stationary", "F1", "F2", "F3", "F4"), "_t-", lag_val)
-#       X_mat <- cbind(X_mat, lagged_cols)
-#     }
-#   }
-#   
-#   # Dataset Finale
-#   data_final <- cbind(
-#     Date_Target = date_fut,
-#     Y_stat_future = y_fut,
-#     Level_Real_Future = level_fut, 
-#     Level_Anchor_t = level_curr,   
-#     X_mat
-#   )
-#   
-#   return(na.omit(data_final))
-# }
-# 
-# # 3. Preparazione Matrice Completa
-# data_modeling <- create_lagged_matrix_levels(df_base, h_step, p_lag)
-# 
-# # Definizione punto di partenza (es. primi 80% dati come base iniziale)
-# nrows <- nrow(data_modeling)
-# split_idx <- floor(0.80 * nrows) 
-# 
-# # Definizione Formula (escludiamo le colonne che non sono regressori)
-# vars_to_exclude <- c("Date_Target", "Level_Real_Future", "Level_Anchor_t")
-# predictors <- setdiff(names(data_modeling), c("Y_stat_future", vars_to_exclude))
-# formula_lm <- as.formula(paste("Y_stat_future ~", paste(predictors, collapse = " + ")))
-# 
-# # 4. LOOP DI PREVISIONE (Recursive / Expanding Window)
-# # Inizializziamo vettori vuoti per salvare i risultati man mano
-# n_forecasts <- nrows - split_idx
-# vec_dates   <- data_modeling$Date_Target[(split_idx + 1):nrows]
-# vec_real    <- data_modeling$Level_Real_Future[(split_idx + 1):nrows]
-# vec_anchor  <- data_modeling$Level_Anchor_t[(split_idx + 1):nrows]
-# vec_pred_diff <- numeric(n_forecasts)
-# 
-# cat("Inizio elaborazione di", n_forecasts, "previsioni mensili...\n")
-# pb <- txtProgressBar(min = 0, max = n_forecasts, style = 3) # Barra di avanzamento
-# 
-# counter <- 1
-# # Il loop parte dallo split e arriva alla fine del dataset
-# for(i in split_idx:(nrows - 1)) {
-#   
-#   # A. Expanding Window: Il train set cresce ad ogni iterazione (da 1 a i)
-#   train_window <- data_modeling[1:i, ]
-#   
-#   # B. Il Test è la singola riga successiva (i + 1)
-#   test_row <- data_modeling[i + 1, , drop = FALSE]
-#   
-#   # C. Stima e Previsione
-#   model_rolling <- lm(formula_lm, data = train_window)
-#   pred_val <- predict(model_rolling, newdata = test_row)
-#   
-#   # D. Salvataggio
-#   vec_pred_diff[counter] <- pred_val
-#   
-#   counter <- counter + 1
-#   setTxtProgressBar(pb, counter)
-# }
-# close(pb)
-# 
-# # 5. BACK-TRANSFORMATION E RISULTATI
-# results_rolling <- data.frame(
-#   Date = vec_dates,
-#   Reale = vec_real,
-#   Anchor = vec_anchor,
-#   Pred_DiffLog = vec_pred_diff
-# ) %>%
-#   mutate(
-#     # Formula inversa: Livello_Previsto = Livello_Ieri * exp(Diff_Prevista)
-#     Previsto = Anchor * exp(Pred_DiffLog)
-#   )
-# 
-# # Calcolo Errori
-# rmse_val <- sqrt(mean((results_rolling$Reale - results_rolling$Previsto)^2))
-# mae_val  <- mean(abs(results_rolling$Reale - results_rolling$Previsto))
-# 
-# cat("\n--- Risultati Recursive Rolling Forecast ---\n")
-# cat("RMSE (Livelli):", round(rmse_val, 2), "\n")
-# cat("MAE  (Livelli):", round(mae_val, 2), "\n")
-# 
-# # 6. GRAFICO FINALE
-# library(ggplot2)
-# 
-# ggplot(results_rolling, aes(x = Date)) +
-#   # Linea Nera: Dato Vero
-#   geom_line(aes(y = Reale, color = "Dati Reali (UMCSENT)"), size = 1) +
-#   # Linea Blu tratteggiata: Previsione Rolling
-#   geom_line(aes(y = Previsto, color = "Previsione Rolling"), size = 0.8, linetype = "dashed") +
-#   
-#   scale_color_manual(values = c("Dati Reali (UMCSENT)" = "black", "Previsione Rolling" = "blue")) +
-#   labs(title = paste("Previsione 'Recursive Rolling' UMCSENT (h =", h_step, ")"),
-#        subtitle = paste("Il modello viene ri-stimato ogni mese. RMSE:", round(rmse_val, 2)),
-#        y = "Index Value", x = "Anno") +
-#   theme_minimal() +
-#   theme(legend.position = "bottom")
-```
-
-
-
-```{r}
-# 
-# # --- PASSAGGIO 4: FORECAST E RITORNO AI LIVELLI ---
-# 
-# library(tidyverse)
-# library(forecast)
-# 
-# # 1. Recupero Dati Originali (Livelli) e Fattori
-# # È fondamentale avere UMCSENT originale (non trasformato)
-# if(!exists("target_clean")) target_clean <- read.csv("data/UMCSENT.csv") %>% 
-#   mutate(observation_date = as.Date(observation_date)) %>% 
-#   filter(observation_date >= "1978-01-01") 
-# 
-# if(!exists("factors_df")) factors_df <- readRDS("factors_extracted.rds")
-# if(!exists("Y_final")) Y_final <- readRDS("Y_final.rds")
-# 
-# # Uniamo tutto in un unico dataframe base
-# # Attenzione: Y_final (stationary) ha delle righe tagliate all'inizio.
-# # Dobbiamo allineare tutto usando le date presenti in factors_df.
-# df_base <- factors_df %>%
-#   inner_join(target_clean, by = c("Date" = "observation_date")) %>%
-#   mutate(
-#     Target_Stationary = Y_final, # La serie diff-log usata per il training
-#     Level_Original = UMCSENT     # Il livello originale (per il grafico finale)
-#   )
-# 
-# # Parametri
-# h_step <- 1      # Previsione a 1 mese (t+1)
-# p_lag  <- 1      # Ordine di lag scelto (es. quello suggerito dal BIC, metti il tuo numero)
-# 
-# cat("Generazione previsioni e Back-Transformation per h =", h_step, "\n")
-# 
-# # 2. Funzione Dataset Aumentata
-# # Questa versione mantiene Date e Livelli per poter tornare indietro dopo
-# create_lagged_matrix_levels <- function(df, h, p) {
-#   
-#   # Variabile Target (Y futura stazionaria)
-#   y_fut <- dplyr::lead(df$Target_Stationary, h)
-#   
-#   # Date e Livelli Futuri (per confronto 'Reale')
-#   date_fut  <- dplyr::lead(df$Date, h)
-#   level_fut <- dplyr::lead(df$Level_Original, h)
-#   
-#   # Livello Corrente (Anchor): Il valore UMCSENT al tempo t (oggi)
-#   # Ci serve per calcolare il futuro: Domani = Oggi * exp(diff_prevista)
-#   level_curr <- df$Level_Original
-#   
-#   # Matrice Regressori (X)
-#   X_mat <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4)
-#   colnames(X_mat) <- paste0(colnames(X_mat), "_t")
-#   
-#   if(p > 0) {
-#     for(lag_val in 1:p) {
-#       lagged_cols <- df %>% dplyr::select(Target_Stationary, F1, F2, F3, F4) %>% dplyr::lag(lag_val)
-#       colnames(lagged_cols) <- paste0(c("Target_Stationary", "F1", "F2", "F3", "F4"), "_t-", lag_val)
-#       X_mat <- cbind(X_mat, lagged_cols)
-#     }
-#   }
-#   
-#   # Uniamo tutto
-#   data_final <- cbind(
-#     Date_Target = date_fut,
-#     Y_stat_future = y_fut,
-#     Level_Real_Future = level_fut, # Il valore vero che vogliamo indovinare
-#     Level_Anchor_t = level_curr,   # Il punto di partenza (UMCSENT al tempo t)
-#     X_mat
-#   )
-#   
-#   return(na.omit(data_final))
-# }
-# 
-# # 3. Creazione Dataset e Split
-# data_modeling <- create_lagged_matrix_levels(df_base, h_step, p_lag)
-# 
-# nrows <- nrow(data_modeling)
-# split_idx <- floor(0.80 * nrows)
-# 
-# # Train set (escludiamo colonne descrittive come Date o Levels dal fitting del modello)
-# train_set <- data_modeling[1:split_idx, ]
-# test_set  <- data_modeling[(split_idx + 1):nrows, ]
-# 
-# # Definiamo le formule escludendo le colonne "di servizio"
-# vars_to_exclude <- c("Date_Target", "Level_Real_Future", "Level_Anchor_t")
-# predictors <- setdiff(names(train_set), c("Y_stat_future", vars_to_exclude))
-# formula_lm <- as.formula(paste("Y_stat_future ~", paste(predictors, collapse = " + ")))
-# 
-# # 4. Stima Modello (sui dati stazionari)
-# final_model <- lm(formula_lm, data = train_set)
-# 
-# # Previsione (sui dati stazionari)
-# preds_stat <- predict(final_model, newdata = test_set)
-# 
-# # 5. BACK-TRANSFORMATION (Il passaggio chiave)
-# # Formula: Level_Predetto = Level_Oggi * exp(Variazione_Log_Predetta)
-# # Se h > 1, la logica "Anchor" cambia leggermente, ma per h=1 è questa.
-# 
-# test_results <- test_set %>%
-#   dplyr::select(Date_Target, Level_Real_Future, Level_Anchor_t, Y_stat_future) %>%
-#   mutate(
-#     Pred_Stat_DiffLog = preds_stat,
-#     
-#     # Calcolo Livello Previsto
-#     Level_Predicted = Level_Anchor_t * exp(Pred_Stat_DiffLog)
-#   )
-# 
-# # Calcolo RMSE sui Livelli
-# rmse_levels <- sqrt(mean((test_results$Level_Real_Future - test_results$Level_Predicted)^2))
-# cat("RMSE sui Livelli Originali:", round(rmse_levels, 2), "\n")
-# 
-# # 6. Plot dei Risultati (Livelli)
-# library(ggplot2)
-# 
-# ggplot(test_results, aes(x = Date_Target)) +
-#   # Linea Nera: Dati Reali
-#   geom_line(aes(y = Level_Real_Future, color = "Dati Reali (UMCSENT)"), size = 1) +
-#   # Linea Rossa: Previsione Modello
-#   geom_line(aes(y = Level_Predicted, color = "Previsione DFM"), size = 0.8, linetype="dashed") +
-#   
-#   scale_color_manual(values = c("Dati Reali (UMCSENT)" = "black", "Previsione DFM" = "red")) +
-#   labs(title = paste("Previsione UMCSENT sui Livelli (h =", h_step, ")"),
-#        subtitle = paste("RMSE:", round(rmse_levels, 2)),
-#        y = "Index Value", x = "Anno") +
-#   theme_minimal() +
-#   theme(legend.position = "bottom")
-```
-
-```{r}
-# 
-# # --- PASSAGGIO 5: DIAGNOSTICA DEI RESIDUI ---
-# 
-# library(tseries)  # Per Jarque-Bera test
-# library(lmtest)   # Per Breusch-Pagan test
-# library(ggplot2)
-# library(gridExtra) # Per unire i grafici
-# 
-# # 1. Estrazione dei Residui dal modello lineare
-# # Nota: Questi sono i residui sui dati differenziati (log-diff), ed è CORRETTO così.
-# residui <- residuals(final_model)
-# 
-# # 2. ANALISI GRAFICA
-# 
-# # A. Plot dei Residui nel tempo (per vedere se "esplodono" o hanno trend)
-# df_resid <- data.frame(Index = 1:length(residui), Residui = residui)
-# 
-# p1 <- ggplot(df_resid, aes(x = Index, y = Residui)) +
-#   geom_line(color = "darkblue") +
-#   geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
-#   labs(title = "Residui nel Tempo", subtitle = "Dovrebbero oscillare a caso intorno allo 0") +
-#   theme_minimal()
-# 
-# # B. Istogramma (per vedere se sembrano una Gaussiana/Normale)
-# p2 <- ggplot(df_resid, aes(x = Residui)) +
-#   geom_histogram(aes(y = ..density..), bins = 30, fill = "lightblue", color = "black") +
-#   stat_function(fun = dnorm, args = list(mean = mean(residui), sd = sd(residui)), color = "red", size = 1) +
-#   labs(title = "Distribuzione dei Residui", subtitle = "Confronto con curva Normale (rossa)") +
-#   theme_minimal()
-# 
-# # C. ACF Plot (Autocorrelazione) - Stile Base R è più chiaro per l'ACF
-# acf(residui, main = "Autocorrelation Function (ACF) dei Residui")
-# 
-# # Mostriamo i plot ggplot
-# grid.arrange(p1, p2, ncol = 2)
-# 
-# 
-# # 3. TEST STATISTICI FORMALI
-# 
-# cat("\n--- RISULTATI TEST DIAGNOSTICI ---\n")
-# 
-# # TEST 1: Ljung-Box (Autocorrelazione)
-# # H0 (Null Hypothesis): I residui sono rumore bianco (NO autocorrelazione) -> VOGLIAMO p-value > 0.05
-# # H1: C'è autocorrelazione (il modello ha perso dei pezzi)
-# lb_test <- Box.test(residui, lag = 10, type = "Ljung-Box")
-# cat("1. Ljung-Box Test (Autocorrelazione):\n")
-# cat("   p-value =", round(lb_test$p.value, 4), "\n")
-# if(lb_test$p.value > 0.05) {
-#   cat("   ESITO: OTTIMO. Non c'è autocorrelazione significativa.\n")
-# } else {
-#   cat("   ESITO: ATTENZIONE. I residui sono ancora correlati (forse serve p_lag più alto).\n")
-# }
-# 
-# # TEST 2: Jarque-Bera (Normalità)
-# # H0: I residui sono distribuiti normalmente -> VOGLIAMO p-value > 0.05
-# # Nota: Nelle serie finanziarie è molto difficile passarlo (code grasse).
-# jb_test <- jarque.bera.test(residui)
-# cat("\n2. Jarque-Bera Test (Normalità):\n")
-# cat("   p-value =", round(jb_test$p.value, 4), "\n")
-# if(jb_test$p.value > 0.05) {
-#   cat("   ESITO: OTTIMO. Residui Normali.\n")
-# } else {
-#   cat("   ESITO: NO. Residui non normali (comune in finanza, vedi 'code grasse').\n")
-# }
-# 
-# # TEST 3: Breusch-Pagan (Omoschedasticità)
-# # H0: La varianza dei residui è costante (Omoschedasticità) -> VOGLIAMO p-value > 0.05
-# # H1: La varianza cambia nel tempo (Eteroschedasticità)
-# bp_test <- bptest(final_model)
-# cat("\n3. Breusch-Pagan Test (Omoschedasticità):\n")
-# cat("   p-value =", round(bp_test$p.value, 4), "\n")
-# if(bp_test$p.value > 0.05) {
-#   cat("   ESITO: OTTIMO. Varianza costante.\n")
-# } else {
-#   cat("   ESITO: ATTENZIONE. Eteroschedasticità presente (la volatilità cambia nel tempo).\n")
-# }
-```
-
-
 
