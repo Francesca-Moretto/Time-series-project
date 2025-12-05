@@ -22,9 +22,9 @@ library(gridExtra)
 ```
 
 ## Preprocessing new series
+### Data Upload
 
 ```{r}
-
 ## 2. Uploading and preprocessing the new series
 
 read_fred_csv <- function(filename, col_name) {
@@ -65,7 +65,51 @@ start(merged_data_1978)
 end(merged_data_1978)
 
 head(merged_data)
+```
 
+```{r}
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Converti xts in data frame per ggplot
+merged_df <- data.frame(Date = index(merged_data_1978), coredata(merged_data_1978))
+merged_df_long <- merged_df %>%
+  pivot_longer(cols = -Date, names_to = "Series", values_to = "Value") %>%
+  filter(!is.na(Value))  # Rimuovi NA per evitare linee interrotte
+
+# Plot con colori distinti per ogni serie
+ggplot(merged_df_long, aes(x = Date, y = Value, color = Series)) +
+  geom_line(size = 0.8, alpha = 0.8) +
+  scale_color_manual(values = c(
+    "Sentiment" = "#E31A1C",   # Rosso
+    "Oil" = "#1F78B4",         # Blu
+    "CPI" = "#33A02C",         # Verde
+    "Unrate" = "#FF7F00",      # Arancione
+    "IndPro" = "#6A3D9A",      # Viola
+    "FedFunds" = "#B15928"     # Marrone
+  )) +
+  labs(
+    title = "Evoluzione temporale delle serie economiche (1978-oggi)",
+    x = "Data",
+    y = "Valore",
+    color = "Serie"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(color = guide_legend(nrow = 2))
+
+```
+
+### Log
+
+```{r}
 #log transformation
 merged_data_1978$log_Sentiment <- log(merged_data_1978$Sentiment)
 merged_data_1978$log_Oil       <- log(merged_data_1978$Oil)
@@ -73,7 +117,55 @@ merged_data_1978$log_Oil       <- log(merged_data_1978$Oil)
 merged_data_1978$log_CPI       <- log(merged_data_1978$CPI)
 merged_data_1978$IndPro <- as.numeric(merged_data_1978$IndPro)
 merged_data_1978$log_IndProd   <- log(merged_data_1978$IndPro)
+```
 
+```{r}
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Seleziona solo le serie log-transformate
+log_series <- merged_data_1978[, c("log_Sentiment", "log_Oil", "log_CPI", "log_IndProd")]
+
+# Converti in formato lungo
+log_df <- data.frame(Date = index(log_series), coredata(log_series))
+log_df_long <- log_df %>%
+  pivot_longer(cols = -Date, names_to = "Series", values_to = "Value") %>%
+  filter(!is.na(Value)) %>%
+  mutate(Series = gsub("log_", "", Series))
+
+# Plot solo delle serie log-transformate
+ggplot(log_df_long, aes(x = Date, y = Value, color = Series)) +
+  geom_line(size = 0.8, alpha = 0.85) +
+  scale_color_manual(values = c(
+    "Sentiment" = "#E31A1C",   # Rosso
+    "Oil" = "#1F78B4",         # Blu
+    "CPI" = "#33A02C",         # Verde
+    "IndPro" = "#FF7F00"       # Arancione
+  )) +
+  labs(
+    title = "Serie economiche log-transformate (1978-oggi)",
+    subtitle = "Sentiment, Oil, CPI, Industrial Production",
+    x = "Data",
+    y = "Log(Valore)",
+    color = "Serie"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 11, color = "grey50"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(color = guide_legend(nrow = 2))
+
+```
+
+### First difference
+
+```{r}
 merged_data_1978$d_Sentiment <- diff(merged_data_1978$log_Sentiment)
 merged_data_1978$d_Oil       <- diff(merged_data_1978$log_Oil)
 # d_Income rimosso
@@ -82,7 +174,154 @@ merged_data_1978$d_IndProd   <- diff(merged_data_1978$log_IndProd)
 merged_data_1978$d_Unrate    <- diff(merged_data_1978$Unrate)
 merged_data_1978$d_FedFunds  <- diff(merged_data_1978$FedFunds)
 head(merged_data_1978)
+```
 
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Seleziona solo le serie differenziate (prima riga NA)
+diff_series <- merged_data_1978[, c("d_Sentiment", "d_Oil", "d_CPI", 
+                                    "d_IndProd", "d_Unrate", "d_FedFunds")]
+
+# Converti in formato lungo (rimuove automaticamente la prima riga NA)
+diff_df <- data.frame(Date = index(diff_series), coredata(diff_series))
+diff_df_long <- diff_df %>%
+  pivot_longer(cols = -Date, names_to = "Series", values_to = "Value") %>%
+  filter(!is.na(Value))
+
+# Plot solo delle serie differenziate
+ggplot(diff_df_long, aes(x = Date, y = Value, color = Series)) +
+  geom_line(size = 0.7, alpha = 0.85) +
+  scale_color_manual(values = c(
+    "d_Sentiment" = "#E31A1C",   # Rosso
+    "d_Oil"       = "#1F78B4",   # Blu
+    "d_CPI"       = "#33A02C",   # Verde
+    "d_IndProd"   = "#FF7F00",   # Arancione
+    "d_Unrate"    = "#6A3D9A",   # Viola
+    "d_FedFunds"  = "#B15928"    # Marrone
+  )) +
+  labs(
+    title = "Prime differenze delle serie economiche (1978-oggi)",
+    subtitle = "Variazioni percentuali mensili (log per Sentiment, Oil, CPI, IndProd)",
+    x = "Data",
+    y = "Δ Log(Valore) o Δ Valore",
+    color = "Serie differenziate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 11, color = "grey50"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(color = guide_legend(nrow = 2))
+
+```
+#### ADF Test
+```{r}
+library(tseries)
+library(knitr)
+library(dplyr)
+
+# Converti xts → data.frame (metodo sicuro)
+merged_df <- data.frame(Date = index(merged_data_1978), coredata(merged_data_1978))
+diff_variables <- c("d_Sentiment", "d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
+
+# Inizializza risultati
+adf_test_results <- data.frame(
+  Variable = character(),
+  ADF_Stat = numeric(),
+  p_value = numeric(),
+  Lags = numeric(),
+  Stationary = character(),
+  stringsAsFactors = FALSE
+)
+
+# ADF su data.frame (100% funzionante)
+for(var in diff_variables) {
+  if(var %in% names(merged_df)) {
+    series_clean <- na.omit(as.numeric(merged_df[[var]]))
+    
+    if(length(series_clean) > 20) {
+      adf_result <- adf.test(series_clean, alternative = "stationary")
+      
+      adf_test_results <- rbind(adf_test_results, data.frame(
+        Variable = var,
+        ADF_Stat = round(adf_result$statistic, 4),
+        p_value = round(adf_result$p.value, 4),
+        Lags = adf_result$parameter,
+        Stationary = ifelse(adf_result$p.value < 0.05, "✅ SÌ", "❌ NO")
+      ))
+    }
+  }
+}
+
+kable(adf_test_results, 
+      caption = "ADF Test sulle serie differenziate (H0: non stazionaria)",
+      digits = 4)
+
+```
+
+#### KPSS Test
+```{r}
+
+library(tseries)
+library(knitr)
+library(dplyr)
+
+# Usa STESSO data.frame merged_df già creato
+diff_variables <- c("d_Sentiment", "d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
+
+# Inizializza risultati KPSS
+kpss_test_results <- data.frame(
+  Variable = character(),
+  KPSS_Stat = numeric(),
+  p_value = numeric(),
+  Lags = numeric(),
+  Stationary = character(),
+  stringsAsFactors = FALSE
+)
+
+# KPSS test su data.frame
+for(var in diff_variables) {
+  if(var %in% names(merged_df)) {
+    series_clean <- na.omit(as.numeric(merged_df[[var]]))
+    
+    if(length(series_clean) > 20) {
+      kpss_result <- kpss.test(series_clean)
+      
+      kpss_test_results <- rbind(kpss_test_results, data.frame(
+        Variable = var,
+        KPSS_Stat = round(kpss_result$statistic, 4),
+        p_value = round(kpss_result$p.value, 4),
+        Lags = kpss_result$parameter,
+        Stationary = ifelse(kpss_result$p.value > 0.05, "✅ SÌ", "❌ NO")
+      ))
+    }
+  }
+}
+
+kable(kpss_test_results, 
+      caption = "KPSS Test sulle serie differenziate (H0: stazionaria | p>0.05 = SÌ)",
+      digits = 4)
+
+```
+
+```{r}
+
+# Unisci risultati per confronto
+combined_tests <- merge(adf_test_results, kpss_test_results, by = "Variable", suffixes = c("_ADF", "_KPSS"))
+kable(combined_tests[, c("Variable", "Stationary_ADF", "Stationary_KPSS")], 
+      caption = "Confronto ADF vs KPSS | Ideale: ✅ ADF + ✅ KPSS")
+
+```
+
+### Scaling
+
+```{r}
 #distributions scaling
 variables_for_scaling <- c("d_Sentiment", "d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds") # d_Income rimosso
 df_scaled_converted <- merged_data_1978 %>%
@@ -97,8 +336,52 @@ mutate(
       .fns = ~as.numeric(scale(.)) 
     )
   )
+```
+
+```{r}
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Assumendo df_scaled_converted sia già pronto dal tuo codice
+scaled_df_long <- df_scaled_converted %>%
+  pivot_longer(cols = variables_for_scaling, 
+               names_to = "Series", values_to = "Value_scaled") %>%
+  filter(!is.na(Value_scaled))
+
+# Plot z-score scalato
+ggplot(scaled_df_long, aes(x = Date, y = Value_scaled, color = Series)) +
+  geom_line(size = 0.8, alpha = 0.85) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", alpha = 0.7) +
+  scale_color_manual(values = c(
+    "d_Sentiment" = "#E31A1C",   # Rosso
+    "d_Oil"       = "#1F78B4",   # Blu
+    "d_CPI"       = "#33A02C",   # Verde
+    "d_IndProd"   = "#FF7F00",   # Arancione
+    "d_Unrate"    = "#6A3D9A",   # Viola
+    "d_FedFunds"  = "#B15928"    # Marrone
+  )) +
+  labs(
+    title = "Prime differenze log-transformate (z-score scalate)",
+    subtitle = "Media=0, Dev.Std=1 per ogni serie | Linea tratteggiata = media",
+    x = "Data",
+    y = "Z-score",
+    color = "Serie"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 11, color = "grey50"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  ) +
+  guides(color = guide_legend(nrow = 2))
+
+```
 
 
+```{r}
 library(zoo) # Necessario per na.approx (interpolazione)
 
 df_numeric <- df_scaled_converted %>%
@@ -606,44 +889,129 @@ cat("RMSFE cumulativo sui livelli:", round(sqrt(mean(cum_errors^2)), 4), "\n")
 ## Residual Diagnostic
 
 ```{r}
-
 library(lmtest)
 library(car)
 library(ggplot2)
 library(gridExtra)
 library(dplyr)
+library(tseries)
 
-# === 1. STIMA MODELLO COMPLETO (su tutto il campione per diagnostiche) ===
+# === 1. STIMA MODELLO COMPLETO ===
 formula_ardl_complete <- as.formula(paste("d_Sentiment ~", paste(colnames(X_all), collapse = " + ")))
-
-# Stima su tutto df_ardl_lagged (non solo finestra)
 model_complete <- lm(formula_ardl_complete, data = df_ardl_lagged)
-
-# Estrai residui e fitted values
 residuals_full <- residuals(model_complete)
 fitted_full <- fitted(model_complete)
 
 cat("=== DIAGNOSTICHE RESIDUI - MODELLO COMPLETO ===\n")
 
-# Test di normalità (Jarque-Bera)
+# === 2. CORREZIONE PER GRADI DI LIBERTÀ ===
+n_params <- length(coef(model_complete)) - 1  # tutti i parametri escluso intercept
+cat("Parametri stimati (fitdf):", n_params, "\n\n")
+
+# === 3. JARQUE-BERA (non cambia) ===
 jb_test <- jarque.bera.test(residuals_full)
-cat("Jarque-Bera Normality Test:\n")
+cat("🔵 JARQUE-BERA Normality Test:\n")
 print(jb_test)
+cat(ifelse(jb_test$p.value > 0.05, "✅ Residui normali OK", "❌ Rifiuta normalità\n"), "\n")
 
-# Test eteroschedasticità (Breusch-Pagan)
-bp_test <- bptest(model_complete)
-cat("\nBreusch-Pagan Heteroskedasticity Test:\n")
-print(bp_test)
+# === 4. LJUNG-BOX CORRETTI per parametri ===
+cat("🔵 LJUNG-BOX Test (CORRETTI per", n_params, "parametri):\n")
 
-# Test autocorrelazione (Durbin-Watson)
-dw_test <- dwtest(model_complete, alternative = "two.sided")
-cat("\nDurbin-Watson Autocorrelation Test:\n")
-print(dw_test)
+# Test principali CORRETTI con fitdf
+ljungbox_lag1 <- Box.test(residuals_full, lag = 1, type = "Ljung-Box", fitdf = n_params)
+ljungbox_lag6 <- Box.test(residuals_full, lag = 6, type = "Ljung-Box", fitdf = n_params)
+ljungbox_lag12 <- Box.test(residuals_full, lag = 12, type = "Ljung-Box", fitdf = n_params)
 
-# VIF (multicollinearità)
-vif_values <- vif(model_complete)
-cat("\nVIF Values:\n")
-print(round(vif_values, 2))
+cat("Lag 1:  Q =", round(ljungbox_lag1$statistic, 2), ", p =", round(ljungbox_lag1$p.value, 4), 
+      ifelse(ljungbox_lag1$p.value > 0.05, "✅", "❌"), "\n")
+cat("Lag 6:  Q =", round(ljungbox_lag6$statistic, 2), ", p =", round(ljungbox_lag6$p.value, 4), 
+      ifelse(ljungbox_lag6$p.value > 0.05, "✅", "❌"), "\n")
+cat("Lag 12: Q =", round(ljungbox_lag12$statistic, 2), ", p =", round(ljungbox_lag12$p.value, 4), 
+      ifelse(ljungbox_lag12$p.value > 0.05, "✅", "❌"), "\n\n")
 
+# Test principale (lag=12) in dettaglio
+cat("🎯 LJUNG-BOX PRINCIPALE (lag=12):\n")
+print(ljungbox_lag12)
+cat(ifelse(ljungbox_lag12$p.value > 0.05, "✅ No autocorrelazione seriale OK", "❌ Autocorrelazione nei residui\n"), "\n")
+
+```
+
+```{r}
+
+# GRAFICO 1: RESIDUI vs FITTED
+p1 <- ggplot(data.frame(resid = residuals_full, fitted = fitted_full), 
+             aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.6, color = "#3498DB") +
+  geom_smooth(method = "loess", se = TRUE, color = "red", alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Residui vs Fitted Values", 
+       subtitle = "Cerca pattern (eterosdasticità)",
+       x = "Fitted Values", y = "Residui") +
+  theme_minimal()
+
+# GRAFICO 2: QQ Plot Jarque-Bera
+p2 <- ggplot(data.frame(resid = residuals_full), aes(sample = resid)) +
+  stat_qq(color = "#3498DB") +
+  stat_qq_line(color = "red", linewidth = 1) +
+  labs(title = "QQ Plot Residui (Jarque-Bera)", 
+       subtitle = paste("JB p-value:", round(jb_test$p.value, 4))) +
+  theme_minimal()
+
+# GRAFICO 3: ACF Residui con Ljung-Box bands
+acf_resid <- acf(residuals_full, plot = FALSE, lag.max = 24)
+p3 <- ggplot(data.frame(lag = acf_resid$lag[-1], acf = acf_resid$acf[-1]), 
+             aes(x = lag, y = acf)) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-1.96, 1.96)/sqrt(length(residuals_full)), 
+             linetype = "dashed", color = "blue") +
+  geom_bar(stat = "identity", fill = "#3498DB", alpha = 0.7, color = "white") +
+  labs(title = "ACF Residui (Ljung-Box)", 
+       subtitle = paste("Ljung-Box lag12 p-val:", round(ljungbox_test_lag12$p.value, 4)),
+       x = "Lag", y = "ACF") +
+  theme_minimal()
+
+# GRAFICO 4: Residui nel tempo
+p4 <- ggplot(data.frame(resid = residuals_full, time = 1:length(residuals_full)), 
+             aes(x = time, y = resid)) +
+  geom_line(color = "#E74C3C", linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Residui nel Tempo", x = "Tempo", y = "Residui") +
+  theme_minimal()
+
+# Mostra grafici 2x2
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+
+
+```
+
+```{r}
+
+diagnostics_summary <- data.frame(
+  Test = c("R²", "Adj R²", "F-stat", "N. Osservazioni",
+           "Jarque-Bera (p-val)", "Ljung-Box lag1 (p-val)", 
+           "Ljung-Box lag6 (p-val)", "Ljung-Box lag12 (p-val)"),
+  Value = c(
+    round(summary(model_complete)$r.squared, 4),
+    round(summary(model_complete)$adj.r.squared, 4),
+    round(summary(model_complete)$fstatistic[1], 2),
+    nrow(df_ardl_lagged),
+    round(jb_test$p.value, 4),
+    round(ljungbox_lag1$p.value, 4),
+    round(ljungbox_lag6$p.value, 4),
+    round(ljungbox_test_lag12$p.value, 4)
+  ),
+  Interpretation = c(
+    "Fit del modello", "Fit aggiustato", "Significatività globale", "Sample size",
+    ifelse(jb_test$p.value > 0.05, "✅ Normalità OK", "❌ Non normale"),
+    ifelse(ljungbox_lag1$p.value > 0.05, "✅ No AC lag1", "❌ AC lag1"),
+    ifelse(ljungbox_lag6$p.value > 0.05, "✅ No AC lag6", "❌ AC lag6"),
+    ifelse(ljungbox_test_lag12$p.value > 0.05, "✅ No AC seriale", "❌ AC seriale")
+  )
+)
+
+print("=== DIAGNOSTICHE COMPLETAMENTE RIASSUNTE ===")
+print(diagnostics_summary)
+cat("\n✅ Modello OK se tutti i p-value > 0.05\n")
 
 ```
