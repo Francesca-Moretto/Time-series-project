@@ -535,7 +535,7 @@ df_model$Date <- final_dates
 # 2. Parametri del Modello
 h_step <- 1        # Orizzonte di previsione
 n_factors <- 4     # Numero di fattori da estrarre
-p_lags_y <- 2      # Lag della Y nell'equazione di previsione
+p_lags_y <- 12      # Lag della Y nell'equazione di previsione
 
 # --- PARAMETRO ROLLING WINDOW ---
 # Definiamo la dimensione fissa della finestra.
