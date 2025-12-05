@@ -82,12 +82,12 @@ merged_data_1978$d_FedFunds  <- diff(merged_data_1978$FedFunds)
 head(merged_data_1978)
 
 #distributions scaling
-variables_for_scaling <- c("log_Sentiment", "log_Oil", "log_Income", "log_CPI", "log_IndProd", "Unrate", "FedFunds")
+variables_for_scaling <- c("d_Sentiment", "d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
 df_scaled_converted <- merged_data_1978 %>%
   timetk::tk_tbl(rename_index = "Date") %>% 
   
 
-select(Date, log_Sentiment, log_Oil, log_Income, log_CPI, log_IndProd, Unrate, FedFunds) %>%
+dplyr::select(Date, d_Sentiment, d_Oil, d_Income, d_CPI, d_IndProd, d_Unrate, d_FedFunds) %>%
   
 mutate(
     across(
@@ -97,37 +97,87 @@ mutate(
   )
 
 
+# ... (tutto il codice precedente fino alla creazione di df_numeric è OK)
+
+library(zoo) # Necessario per na.approx (interpolazione)
+
+# ... (tutto il codice precedente fino alla creazione di df_numeric è OK)
+
 df_numeric <- df_scaled_converted %>%
-  select(-Date) 
+  dplyr::select(-Date) 
 
-#Imputating na values
-df_numeric_imputed <- df_numeric %>%
-  fill(everything(), .direction = "down") 
+# --- GESTIONE DEI VALORI MANCANTI ---
 
-colSums(is.na(df_numeric_imputed))
+# PASSO 1: Rimuovi SOLO la prima riga in modo chirurgico
+# Usiamo slice(-1) invece di drop_na(). 
+# Questo toglie la riga 1 (Gennaio '78) senza toccare eventuali buchi nel 1985, 1990, ecc.
+df_no_first_row <- df_numeric %>%
+  dplyr::slice(-1)
 
-ts_data <- ts(df_numeric_imputed, start = c(1978, 1), frequency = 12)
+# PASSO 2: Controlla se ci sono buchi interni
+# Se la somma è 0, siamo a posto. Se > 0, dobbiamo riempirli.
+n_missing <- sum(is.na(df_no_first_row))
+cat("Valori mancanti interni trovati:", n_missing, "\n")
+
+# PASSO 3: Imputazione (Interpolazione) dei buchi interni
+# na.approx riempie i buchi collegando i punti. 
+# na.rm = FALSE assicura che non droppi nulla se l'interpolazione fallisce (es. se manca l'ultimo dato)
+df_numeric_imputed <- df_no_first_row %>%
+  mutate(across(everything(), ~zoo::na.approx(., na.rm = FALSE))) %>%
+  # Sicurezza extra: se mancano dati proprio alla fine (dicembre 2023), usa l'ultimo valore disponibile
+  fill(everything(), .direction = "down")
+
+# Verifica finale
+if(any(is.na(df_numeric_imputed))) warning("Attenzione: ci sono ancora NA!")
+
+# --- CREAZIONE TS ---
+
+# Ora possiamo creare la TS partendo da Febbraio 1978 in sicurezza
+ts_data <- ts(df_numeric_imputed, start = c(1978, 2), frequency = 12)
+
 head(ts_data)
-
 ```
 
 
 ## 3.Dataset with differtiated data
 
 ```{r}
+library(zoo) # Fondamentale per le serie temporali irregolari
 
+# 1. Selezioniamo le variabili (come hai fatto tu)
 df_diff <- merged_data_1978[, c("d_Sentiment", "d_Oil", "d_Income", "d_CPI", 
                                 "d_IndProd", "d_Unrate", "d_FedFunds")]
 
-df_diff_clean <- na.omit(df_diff)
+# 2. RIMUOVIAMO LA PRIMA RIGA (Gennaio 1978)
+# Questo passaggio è obbligatorio perché è NA per definizione (dovuto al diff).
+# Non dobbiamo interpolarla, dobbiamo proprio toglierla.
+df_trimmed <- df_diff[-1, ]
 
-ts_diff <- ts(df_diff_clean, start = c(1978, 2), frequency = 12)
+# 3. APPLICHIAMO L'INTERPOLAZIONE SUI BUCHI RIMASTI
+# na.approx: riempie i buchi collegando i punti (media lineare).
+# rule = 2: se il buco è proprio all'ULTIMO mese del dataset, 
+#           copia il valore del mese precedente (evita errori alla fine).
+df_filled <- na.approx(df_trimmed, rule = 2)
 
+# Controllo di sicurezza: ora la somma degli NA deve essere 0
+if(sum(is.na(df_filled)) > 0) {
+  stop("Errore: Ci sono ancora NA! Controlla se hai colonne interamente vuote.")
+} else {
+  print("Tutti i valori mancanti sono stati riempiti correttamente.")
+}
+
+# 4. CREAZIONE DELL'OGGETTO TS
+# Ricorda: start = c(1978, 2) perché abbiamo tolto Gennaio
+ts_diff <- ts(df_filled, start = c(1978, 2), frequency = 12)
+
+# Visualizziamo le prime righe
 head(ts_diff)
 ```
 
 
 ## 4.VIF Test 
+Misura quanto la varianza di un coefficiente di regressione è "gonfiata" a causa della correlazione con le altre variabili.
+Hai fatto benissimo a usare ts_diff e non i dati originali. Nelle serie storiche economiche (PIL, CPI, Oil), i dati "livello" crescono tutti insieme nel tempo (hanno un trend). Se avessi calcolato il VIF sui livelli, avresti ottenuto valori altissimi (falsi positivi) solo perché tutte le curve salgono verso destra. Facendolo sulle differenze (i tassi di variazione), stai testando la vera correlazione strutturale: "Quando il petrolio sale, l'inflazione sale immediatamente nello stesso mese?"
 ```{r}
 
 lm_check_diff <- lm(d_Sentiment ~ d_Oil + d_Income + d_CPI + d_IndProd + d_Unrate + d_FedFunds, 
@@ -156,24 +206,26 @@ test_x <- test_ts_diff[, c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate"
 ```
 
 
-## 6. PACF and ACF
+## 6. CCF
 ```{r}
+# Imposta la finestra grafica per mostrare 6 grafici (2 righe, 3 colonne)
+par(mfrow=c(2,3))
 
-par(mfrow = c(1, 2))
+# Elenco dei nomi delle tue variabili esogene (modifica i nomi se necessario)
+regressori <- c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
 
-#PACF for choosing p parameter
-pacf(train_y, 
-     main = "PACF (Training Set)", 
-     lag.max = 24)
+# Ciclo per stampare le CCF
+for(var in regressori) {
+  ccf(ts_diff[, var], ts_diff[, "d_Sentiment"], 
+      main = paste(var, "vs Sentiment"),
+      ylab = "CCF",
+      lag.max = 12) # Guarda fino a 12 mesi indietro
+}
 
-#ACF for choosing q parameter
-acf(train_y, 
-    main = "ACF (Training Set)", 
-    lag.max = 24)
-
-par(mfrow = c(1, 1))
-
+# Ripristina la finestra grafica normale
+par(mfrow=c(1,1))
 ```
+
 
 ## 7. AIC e BIC
 ```{r}
@@ -182,18 +234,21 @@ library(forecast)
 library(dplyr)
 
 # --- IMPOSTA QUI LA TUA SERIE ---
-target_series <- train_y   # <<--- CAMBIALO SE SERVE
+library(forecast)
+library(dplyr)
+library(ggplot2)
+
+# --- Analisi preliminare della struttura AR del target ---
+target_series <- train_y 
 
 results <- data.frame(Order = integer(),
-                      Type = character(),
                       AIC = numeric(),
                       BIC = numeric())
 
+# Testiamo solo l'AutoRegressione (AR) da 1 a 12
 for (i in 1:12) {
-  
-  # AR(p)
   model_ar <- tryCatch(
-    Arima(target_series, order = c(i, 1, 0)),
+    Arima(target_series, order = c(i, 0, 0)), # Solo AR, niente MA
     error = function(e) NULL
   )
   
@@ -201,50 +256,341 @@ for (i in 1:12) {
     results <- rbind(
       results,
       data.frame(Order = i,
-                 Type = "AR Model",
                  AIC = AIC(model_ar),
                  BIC = BIC(model_ar))
     )
   }
-  
-  # MA(q)
-  model_ma <- tryCatch(
-    Arima(target_series, order = c(0, 1, i)),
-    error = function(e) NULL
-  )
-  
-  if (!is.null(model_ma)) {
-    results <- rbind(
-      results,
-      data.frame(Order = i,
-                 Type = "MA Model",
-                 AIC = AIC(model_ma),
-                 BIC = BIC(model_ma))
-    )
-  }
 }
 
-# --- Debug: controlla se abbiamo risultati ---
-print(results)
-
-if (nrow(results) == 0) {
-  stop("⚠️ Nessun modello è stato stimato: la serie è sbagliata oppure costante.")
-}
-
-# --- Plot finale ---
+# --- Plot ---
 results_long <- pivot_longer(results, cols = c("AIC", "BIC"),
                              names_to = "Metric", values_to = "Value")
 
 ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
-  geom_line(size = 1) +
+  geom_line(linewidth = 1) +
   geom_point(size = 2) +
-  facet_wrap(~ Type, scales = "free_y") +
   scale_x_continuous(breaks = 1:12) +
-  labs(title = "AIC & BIC Comparison (AR vs MA)",
-       subtitle = "ARIMA(p,1,0) e ARIMA(0,1,q)",
-       x = "Order",
-       y = "Criterion") +
+  labs(title = "Selezione Lag per la parte AutoRegressiva (Y)",
+       subtitle = "Indica quanti ritardi del Sentiment includere nel modello ARDL",
+       x = "Numero di Lag (p)",
+       y = "Information Criteria") +
   theme_minimal()
+```
+
+```{r}
+
+library(dplyr)
+library(forecast)
+
+# Parametri
+p_y <- 6            # numero lag di y nella parte autoregressiva (p)
+max_lag_x <- 6      # numero max lag da usare per ciascun regressore (q)
+horizons <- c(1,3,6) # orizzonti di interesse
+window_size <- 200  # lunghezza finestra rolling (scegli in base ai tuoi dati)
+
+# Funzione per costruire regressori ritardati osservabili ex-ante al tempo t
+build_features <- function(df, p_y, max_lag_x) {
+  df <- as.data.frame(df)
+  n <- nrow(df)
+  # costruisci lag di y
+  for(i in 1:p_y) df[[paste0("lagY_", i)]] <- dplyr::lag(df$d_Sentiment, i)
+  # per ogni regressore X costruisci lag 0..max_lag_x (ma NON useremo lag0 per evitare contemporanei)
+  regressors <- c("d_Oil","d_Income","d_CPI","d_IndProd","d_Unrate","d_FedFunds")
+  for(x in regressors) {
+    for(l in 1:max_lag_x) {
+      newname <- paste0(x, "_lag", l)
+      df[[newname]] <- dplyr::lag(df[[x]], l)
+    }
+  }
+  df
+}
+
+# Prepara dataframe con features
+df_all <- as.data.frame(ts_diff) %>% tibble::rownames_to_column(var="Date") # se necessario
+df_feat <- build_features(df_all, p_y, max_lag_x)
+
+# Rolling direct forecast per horizon
+results_list <- list()
+
+for(h in horizons) {
+  preds <- numeric()
+  trues <- numeric()
+  n <- nrow(df_feat)
+  # creiamo target h-step ahead: yt_h = d_Sentiment_{t+h}
+  df_feat$target_h <- dplyr::lead(df_feat$d_Sentiment, h)
+  
+  # rolling windows: train window ends at t, predict target at t+h
+  start_idx <- 1
+  end_idx <- n - h  # ultimo t per cui target_h esiste
+  
+  for(t in seq(window_size, end_idx)) {
+    train_idx <- (t - window_size + 1):t
+    test_idx  <- t + h  # index of the true target
+    
+    train_df <- df_feat[train_idx, ]
+    # seleziona variabili utili (escludi rows con NA dovuti ai lag)
+    train_df <- na.omit(train_df)
+    if(nrow(train_df) < 50) next # salta se pochi dati
+    
+    # definisci formula (puoi anche fare selection automatica)
+    feature_names <- grep("lagY_|_lag", names(train_df), value = TRUE)
+    form <- as.formula(paste("target_h ~", paste(feature_names, collapse = " + ")))
+    
+    fit <- lm(form, data = train_df)
+    
+    # costruisci riga di predizione corrispondente al tempo t (ultimi valori osservabili)
+    newrow <- df_feat[t, feature_names, drop = FALSE]
+    if(any(is.na(newrow))) {
+      # se mancano features nella finestra di predizione puoi saltare o imputare
+      next
+    }
+    pred <- predict(fit, newdata = newrow)
+    true_val <- df_feat[test_idx, "target_h"]
+    
+    preds <- c(preds, pred)
+    trues <- c(trues, true_val)
+  }
+  
+  # metriche
+  mse <- mean((preds - trues)^2, na.rm = TRUE)
+  mae <- mean(abs(preds - trues), na.rm = TRUE)
+  results_list[[paste0("h", h)]] <- list(preds = preds, trues = trues, MSE = mse, MAE = mae)
+  cat("H=", h, " MSE=", round(mse,5), " MAE=", round(mae,5), "\n")
+}
+
+# Ora puoi confrontare risultati_list per gli orizzonti e tracciarli
+
+```
+
+
+```{r}
+
+
+library(dplyr)
+library(zoo)
+
+# --- 1. CONFIGURAZIONE EX-POST (Direct ARDL) ---
+
+# A. Lag del SENTIMENT (Parte Autoregressiva)
+# Ex-post o Ex-ante, il Sentiment futuro non lo conosciamo mai.
+# Quindi usiamo sempre i valori passati (t-1, t-2...)
+lags_sentiment <- c(1, 2)  
+
+# B. Lag dei REGRESSORI (Logica EX-POST)
+# In Ex-Post conosciamo i valori futuri delle X.
+# - Se la reazione è immediata (es. Unrate): Usiamo Lag 0 (Contemporaneo).
+# - Se la reazione è ritardata (es. Oil): Usiamo i Lag specifici (es. 9, 12).
+
+regressor_lags <- list(
+  d_Oil      = c(1,9,12),    # Reazione lenta (identificata da CCF)
+  d_CPI      = c(1),     # Lag 0 (Ex-Post: so l'inflazione di oggi) + Lag 1 (inerzia)
+  d_Unrate   = c(1),     # Lag 0 (Ex-Post: so la disoccupazione di oggi)
+  d_IndProd  = c(1),        # Lag 0 (Produzione contemporanea)
+  d_FedFunds = c(1)         # Lag 0 (Tassi contemporanei)
+  # d_Income escluso come da analisi precedente
+)
+
+# C. Parametri Rolling Window
+window_size <- 120  # Finestra mobile di 10 anni
+# Nota: In Ex-Post, l'horizon è implicito nel dataset allineato.
+# Stiamo prevedendo Y_t usando le X disponibili (anche contemporanee) per quella riga.
+
+# ---------------------------------------------------------
+
+# --- 2. FUNZIONE PER CREARE IL DATASET (Adattata per Ex-Post) ---
+create_lagged_dataset <- function(ts_data, y_name, y_lags, x_lags_list) {
+  
+  df <- as.data.frame(ts_data)
+  
+  # Dataframe base con il Target Y al tempo t
+  final_df <- data.frame(Target = df[, y_name]) 
+  
+  # 1. Crea Lag per Y (Sentiment) -> Sempre passati (t-1, t-2)
+  for (l in y_lags) {
+    col_name <- paste0("Lag_Y_", l)
+    final_df[[col_name]] <- dplyr::lag(df[, y_name], n = l)
+  }
+  
+  # 2. Crea Lag per i Regressori (X) -> Include 0 per Ex-Post
+  for (var_name in names(x_lags_list)) {
+    lags <- x_lags_list[[var_name]]
+    for (l in lags) {
+      # Se l=0, è il valore contemporaneo (Ex-Post knowledge)
+      # Se l>0, è il valore passato (Struttura economica)
+      suffix <- ifelse(l == 0, "_curr", paste0("_", l))
+      col_name <- paste0("Lag_", var_name, suffix)
+      
+      if(var_name %in% names(df)) {
+        final_df[[col_name]] <- dplyr::lag(df[, var_name], n = l)
+      } else {
+        warning(paste("Variabile", var_name, "non trovata!"))
+      }
+    }
+  }
+  
+  return(final_df)
+}
+
+# Creazione del dataset
+df_model_ready <- create_lagged_dataset(ts_diff, "d_Sentiment", lags_sentiment, regressor_lags)
+
+# Pulizia NA (Le prime righe saranno vuote a causa del lag massimo, es. 12 mesi per Oil)
+df_clean <- na.omit(df_model_ready)
+
+cat("Dataset Ex-Post pronto. Righe totali:", nrow(df_clean), "\n")
+head(df_clean)
+
+# ---------------------------------------------------------
+
+# --- 3. ROLLING WINDOW LOOP ---
+
+n_rows <- nrow(df_clean)
+predictions <- numeric()
+actuals <- numeric()
+
+# Indice di partenza
+start_index <- window_size + 1
+
+if (n_rows < start_index) stop("La window_size è più grande del dataset!")
+
+cat("Inizio Rolling Window Ex-Post...\n")
+
+for (i in start_index:n_rows) {
+  
+  # A. Train: Finestra mobile
+  train_idx <- (i - window_size):(i - 1)
+  
+  # B. Test: Riga corrente 'i'
+  # Poiché è EX-POST, in df_clean alla riga 'i' abbiamo:
+  # - Target reale (d_Sentiment) -> Che vogliamo prevedere/confrontare
+  # - X contemporanee (Lag 0) -> Che CONOSCIAMO (Ex-post assumption)
+  test_idx <- i
+  
+  train_data <- df_clean[train_idx, ]
+  test_row   <- df_clean[test_idx, , drop = FALSE]
+  
+  # C. Fit Modello (Target ~ Tutte le colonne create dai lag)
+  fit <- lm(Target ~ ., data = train_data)
+  
+  # D. Previsione
+  pred <- predict(fit, newdata = test_row)
+  
+  # E. Salvataggio
+  predictions <- c(predictions, pred)
+  actuals <- c(actuals, test_row$Target)
+}
+
+# ---------------------------------------------------------
+
+# --- 4. VALUTAZIONE ---
+
+results_df <- data.frame(
+  Actual = actuals,
+  Predicted = predictions,
+  Error = actuals - predictions
+)
+
+rmse <- sqrt(mean(results_df$Error^2))
+mae <- mean(abs(results_df$Error))
+
+cat("--- Risultati Rolling Window (Ex-Post) ---\n")
+cat("RMSE:", round(rmse, 4), "\n")
+cat("MAE: ", round(mae, 4), "\n")
+
+# --- 5. PLOT ---
+plot(results_df$Actual, type = "l", col = "black", lwd = 1,
+     main = "Ex-Post Forecast (ARDL con Lag 0 per X veloci)", 
+     ylab = "d_Sentiment", xlab = "Time Steps")
+lines(results_df$Predicted, col = "red", lwd = 1)
+legend("topleft", legend = c("Reale", "Previsto (Ex-Post)"), col = c("black", "red"), lty = 1)
+grid()
+```
+
+```{r}
+
+# ============================================================
+# === RICOSTRUZIONE CORRETTA DEI LIVELLI (NO ERRORI xts) ===
+# ============================================================
+
+# 1. Serie originale in LOG (convertita in VETTORE NUMERICO)
+log_sentiment_vec <- as.numeric(merged_data_1978$log_Sentiment)
+
+# 2. Allineamento alla lunghezza di df_clean
+log_sentiment_aligned <- tail(log_sentiment_vec, nrow(df_clean))
+
+# 3. Indice di inizio previsione (uguale al rolling)
+start_index <- window_size + 1
+
+# 4. Livello iniziale vero (LOG)
+log_S0 <- log_sentiment_aligned[start_index - 1]
+
+# ============================================================
+# === LIVELLI PREVISTI ===
+# ============================================================
+
+predicted_diff <- as.numeric(results_df$Predicted)
+
+log_forecast_levels <- log_S0 + cumsum(predicted_diff)
+forecast_levels <- exp(log_forecast_levels)
+
+# ============================================================
+# === LIVELLI REALI ===
+# ============================================================
+
+actual_diff <- as.numeric(results_df$Actual)
+
+log_real_levels <- log_S0 + cumsum(actual_diff)
+real_levels <- exp(log_real_levels)
+
+# ============================================================
+# === DATE CORRETTE PER ASSE X ===
+# ============================================================
+
+date_index <- index(merged_data_1978)
+date_index_aligned <- tail(date_index, nrow(df_clean))
+forecast_dates <- date_index_aligned[start_index:nrow(df_clean)]
+
+# ============================================================
+# === DATAFRAME FINALE ===
+# ============================================================
+
+levels_df <- data.frame(
+  Date = forecast_dates,
+  Real = real_levels,
+  Forecast = forecast_levels
+)
+
+# ============================================================
+# === METRICHE DI ERRORE SUI LIVELLI ===
+# ============================================================
+
+level_errors <- levels_df$Real - levels_df$Forecast
+
+rmse_levels <- sqrt(mean(level_errors^2))
+mae_levels  <- mean(abs(level_errors))
+
+cat("====================================\n")
+cat("RMSE sui LIVELLI:", round(rmse_levels, 3), "\n")
+cat("MAE  sui LIVELLI:", round(mae_levels, 3), "\n")
+cat("====================================\n")
+
+# ============================================================
+# === GRAFICO FINALE SUI LIVELLI CON DATE REALI ===
+# ============================================================
+
+plot(levels_df$Date, levels_df$Real, type = "l", col = "black", lwd = 2,
+     main = "ARDL – Previsioni sui Livelli del Sentiment",
+     ylab = "Sentiment (Livelli)", xlab = "Data")
+
+lines(levels_df$Date, levels_df$Forecast, col = "red", lwd = 2)
+
+legend("topleft",
+       legend = c("Reale", "Previsto"),
+       col = c("black", "red"),
+       lty = 1, lwd = 2)
+
+grid()
+
 
 ```
 
@@ -252,8 +598,8 @@ ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
 ## 8. ARIMAX(1,1,0) Model
 ```{r}
 
-my_p <- 7   
-my_q <- 0  
+my_p <- 2  
+my_q <- 0
 
 
 xreg_cols <- c("d_Oil", "d_Income", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
