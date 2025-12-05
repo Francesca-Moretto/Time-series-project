@@ -1,0 +1,649 @@
+---
+title: "ARDL_prova1"
+output: html_document
+date: "2025-12-05"
+---
+
+```{r}
+
+library(xts)
+library(dplyr)
+library(timetk)
+library(factoextra)
+library(tidyr)
+library(dplyr)
+library(forecast)  
+library(tseries)   
+library(car)     
+library(ggplot2)
+library(gridExtra)
+
+
+```
+
+## Preprocessing new series
+
+```{r}
+
+## 2. Uploading and preprocessing the new series
+
+read_fred_csv <- function(filename, col_name) {
+  path <- file.path("data", filename)
+  if(!file.exists(path)) {
+    warning("File mancante: ", path)
+    return(NULL)
+  }
+  df <- read.csv(path, stringsAsFactors = FALSE)
+  dates <- as.Date(df[,1], tryFormats = c("%Y-%m-%d","%d/%m/%Y","%Y/%m/%d"))
+  values <- as.numeric(df[,2])
+  clean <- na.omit(data.frame(Date = dates, Value = values))
+  if(nrow(clean) == 0) return(NULL)
+  xts_obj <- xts(clean$Value, order.by = clean$Date)
+  colnames(xts_obj) <- col_name
+  return(xts_obj)
+}
+
+UMCSENT  <- read_fred_csv("UMCSENT.csv",  "Sentiment")
+WTISPLC  <- read_fred_csv("WTISPLC.csv",  "Oil")
+# Income rimosso
+CPIAUCSL <- read_fred_csv("CPIAUCSL.csv", "CPI")
+UNRATE   <- read_fred_csv("UNRATE.csv",   "Unrate")
+INDPRO   <- read_fred_csv("INDPRO.csv",   "IndPro")
+FEDFUNDS <- read_fred_csv("FEDFUNDS.csv", "FedFunds")
+
+series_list <- list(
+  UMCSENT, WTISPLC, CPIAUCSL, # PI rimosso
+  UNRATE, INDPRO, FEDFUNDS
+)
+
+series_list <- series_list[!sapply(series_list, is.null)]
+
+merged_data <- Reduce(function(x, y) merge(x, y, all = TRUE), series_list)
+merged_data_1978 <- merged_data["1978/"]
+nrow(merged_data_1978)
+start(merged_data_1978)
+end(merged_data_1978)
+
+head(merged_data)
+
+#log transformation
+merged_data_1978$log_Sentiment <- log(merged_data_1978$Sentiment)
+merged_data_1978$log_Oil       <- log(merged_data_1978$Oil)
+# log_Income rimosso
+merged_data_1978$log_CPI       <- log(merged_data_1978$CPI)
+merged_data_1978$IndPro <- as.numeric(merged_data_1978$IndPro)
+merged_data_1978$log_IndProd   <- log(merged_data_1978$IndPro)
+
+merged_data_1978$d_Sentiment <- diff(merged_data_1978$log_Sentiment)
+merged_data_1978$d_Oil       <- diff(merged_data_1978$log_Oil)
+# d_Income rimosso
+merged_data_1978$d_CPI       <- diff(merged_data_1978$log_CPI)
+merged_data_1978$d_IndProd   <- diff(merged_data_1978$log_IndProd)
+merged_data_1978$d_Unrate    <- diff(merged_data_1978$Unrate)
+merged_data_1978$d_FedFunds  <- diff(merged_data_1978$FedFunds)
+head(merged_data_1978)
+
+#distributions scaling
+variables_for_scaling <- c("d_Sentiment", "d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds") # d_Income rimosso
+df_scaled_converted <- merged_data_1978 %>%
+  timetk::tk_tbl(rename_index = "Date") %>% 
+  
+
+dplyr::select(Date, d_Sentiment, d_Oil, d_CPI, d_IndProd, d_Unrate, d_FedFunds) %>% # d_Income rimosso
+  
+mutate(
+    across(
+      .cols = all_of(variables_for_scaling), 
+      .fns = ~as.numeric(scale(.)) 
+    )
+  )
+
+
+library(zoo) # Necessario per na.approx (interpolazione)
+
+df_numeric <- df_scaled_converted %>%
+  dplyr::select(-Date) 
+
+# --- GESTIONE DEI VALORI MANCANTI ---
+
+# PASSO 1: Rimuovi SOLO la prima riga in modo chirurgico
+df_no_first_row <- df_numeric %>%
+  dplyr::slice(-1)
+
+# PASSO 2: Controlla se ci sono buchi interni
+n_missing <- sum(is.na(df_no_first_row))
+cat("Valori mancanti interni trovati:", n_missing, "\n")
+
+# PASSO 3: Imputazione (Interpolazione) dei buchi interni
+df_numeric_imputed <- df_no_first_row %>%
+  mutate(across(everything(), ~zoo::na.approx(., na.rm = FALSE))) %>%
+  fill(everything(), .direction = "down")
+
+# Verifica finale
+if(any(is.na(df_numeric_imputed))) warning("Attenzione: ci sono ancora NA!")
+
+# --- CREAZIONE TS ---
+
+# Ora possiamo creare la TS partendo da Febbraio 1978 in sicurezza
+ts_data <- ts(df_numeric_imputed, start = c(1978, 2), frequency = 12)
+
+head(ts_data)
+
+```
+
+```{r}
+
+library(zoo) # Fondamentale per le serie temporali irregolari
+
+# 1. Selezioniamo le variabili (senza d_Income)
+df_diff <- merged_data_1978[, c("d_Sentiment", "d_Oil", "d_CPI", # d_Income rimosso
+                                "d_IndProd", "d_Unrate", "d_FedFunds")]
+
+# 2. RIMUOVIAMO LA PRIMA RIGA (Gennaio 1978)
+df_trimmed <- df_diff[-1, ]
+
+# 3. APPLICHIAMO L'INTERPOLAZIONE SUI BUCHI RIMASTI
+df_filled <- na.approx(df_trimmed, rule = 2)
+
+# Controllo di sicurezza: ora la somma degli NA deve essere 0
+if(sum(is.na(df_filled)) > 0) {
+  stop("Errore: Ci sono ancora NA! Controlla se hai colonne interamente vuote.")
+} else {
+  print("Tutti i valori mancanti sono stati riempiti correttamente.")
+}
+
+# 4. CREAZIONE DELL'OGGETTO TS
+ts_diff <- ts(df_filled, start = c(1978, 2), frequency = 12)
+
+# Visualizziamo le prime righe
+head(ts_diff)
+```
+
+## VIFF
+
+```{r}
+# Ho rimosso d_Income dalla formula
+lm_check_diff <- lm(d_Sentiment ~ d_Oil + d_CPI + d_IndProd + d_Unrate + d_FedFunds, 
+                    data = as.data.frame(ts_diff))
+
+vif_diff <- car::vif(lm_check_diff)
+print("--- VIFF on differences ---")
+print(vif_diff)
+```
+
+## Training Test Split
+
+```{r}
+n_obs_diff <- nrow(ts_diff)
+split_point <- floor(0.80 * n_obs_diff)
+
+train_ts_diff <- window(ts_diff, end = c(time(ts_diff)[split_point]))
+test_ts_diff  <- window(ts_diff, start = c(time(ts_diff)[split_point + 1]))
+
+train_y <- train_ts_diff[, "d_Sentiment"]
+# Rimosso d_Income dalla selezione delle x
+train_x <- train_ts_diff[, c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
+
+test_y <- test_ts_diff[, "d_Sentiment"]
+# Rimosso d_Income dalla selezione delle x
+test_x <- test_ts_diff[, c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
+```
+
+## CFF
+
+```{r}
+# Imposta la finestra grafica per mostrare 6 grafici (2 righe, 3 colonne)
+# (Nota: ora avrai un grafico vuoto poiché sono rimaste 5 variabili)
+par(mfrow=c(2,3))
+
+# Elenco dei nomi delle variabili (d_Income rimosso)
+regressori <- c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds") 
+
+# Ciclo per stampare le CCF
+for(var in regressori) {
+  ccf(ts_diff[, var], ts_diff[, "d_Sentiment"], 
+      main = paste(var, "vs Sentiment"),
+      ylab = "CCF",
+      lag.max = 12) 
+}
+
+# Ripristina la finestra grafica normale
+par(mfrow=c(1,1))
+```
+
+## AIC BIC
+
+```{r}
+library(tidyr)
+library(forecast)
+library(dplyr)
+
+# --- IMPOSTA QUI LA TUA SERIE ---
+library(forecast)
+library(dplyr)
+library(ggplot2)
+
+# --- Analisi preliminare della struttura AR del target ---
+target_series <- train_y 
+
+results <- data.frame(Order = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+# Testiamo solo l'AutoRegressione (AR) da 1 a 12
+for (i in 1:12) {
+  model_ar <- tryCatch(
+    Arima(target_series, order = c(i, 0, 0)), # Solo AR, niente MA
+    error = function(e) NULL
+  )
+  
+  if (!is.null(model_ar)) {
+    results <- rbind(
+      results,
+      data.frame(Order = i,
+                 AIC = AIC(model_ar),
+                 BIC = BIC(model_ar))
+    )
+  }
+}
+
+# --- Plot ---
+results_long <- pivot_longer(results, cols = c("AIC", "BIC"),
+                             names_to = "Metric", values_to = "Value")
+
+ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 1:12) +
+  labs(title = "Selezione Lag per la parte AutoRegressiva (Y)",
+       subtitle = "Indica quanti ritardi del Sentiment includere nel modello ARDL",
+       x = "Numero di Lag (p)",
+       y = "Information Criteria") +
+  theme_minimal()
+```
+
+## Lag Setup
+
+```{r}
+
+library(dplyr)
+library(rlang)
+library(tidyr)
+
+make_lagged_df <- function(df, lag_list, y_name) {
+  # df: tibble/data.frame con le serie in livelli/differenze
+  # lag_list: lista con nomi = variabili, valore = vettore di lag da creare
+  #           es: list(d_Sentiment = 1:2, d_Oil = 1, d_IndProd = 0, ...)
+  # y_name: nome della variabile target (stringa), es. "d_Sentiment"
+  
+  out <- df
+  
+  for (var in names(lag_list)) {
+    lags <- lag_list[[var]]
+    
+    for (L in lags) {
+      if (L == 0) {
+        # lag 0 = valore corrente -> lo rinominiamo L0_var per coerenza
+        new_name <- paste0("L0_", var)
+        out[[new_name]] <- out[[var]]
+      } else {
+        new_name <- paste0("L", L, "_", var)
+        out[[new_name]] <- dplyr::lag(out[[var]], L)
+      }
+    }
+  }
+  
+  # Rimuovi le righe con NA in y o in almeno una delle colonne lag
+  cols_to_keep <- c(
+    y_name,
+    grep("^L[0-9]+_", names(out), value = TRUE)
+  )
+  
+  out_clean <- out %>%
+    dplyr::select(all_of(cols_to_keep)) %>%
+    drop_na()
+  
+  return(out_clean)
+}
+
+```
+
+```{r}
+# Base: converto ts_diff in tibble
+df_base <- as.data.frame(ts_diff) %>%
+  as_tibble()
+
+# Definisco i lag desiderati PER ORA
+lag_spec <- list(
+  d_Sentiment = 1:2,   # p = 2
+  d_Oil       = 1,     # lag 1
+  d_CPI       = 1,     # lag 1
+  d_IndProd   = 0,     # lag 0
+  d_Unrate    = 0,     # lag 0
+  d_FedFunds  = 2    # lag 1 e 2
+)
+
+df_ardl_lagged <- make_lagged_df(
+  df      = df_base,
+  lag_list = lag_spec,
+  y_name  = "d_Sentiment"
+)
+
+# Separazione y e X, utile per stima e rolling
+y_ardl <- df_ardl_lagged$d_Sentiment
+X_ardl <- df_ardl_lagged %>%
+  dplyr::select(-d_Sentiment)
+
+```
+
+## Rolling Window
+
+```{r}
+
+# y e X dal dataset laggato
+y_all <- df_ardl_lagged$d_Sentiment
+X_all <- df_ardl_lagged %>% dplyr::select(-d_Sentiment)
+
+n_obs <- length(y_all)
+
+# Puoi scegliere:
+# - una dimensione in % del campione, es. 80%
+# - oppure un numero fisso di osservazioni per finestra, es. 120 mesi
+
+# Esempio: 80% del campione come finestra iniziale
+initial_frac  <- 0.80
+window_size   <- floor(initial_frac * n_obs)
+
+# Indici:
+# - la prima finestra va da 1 a window_size
+# - l'ultima previsione che puoi fare è in posizione n_obs - 1
+#   (perché per prevedere y_{t+1} devi fermarti almeno a t = n_obs - 1)
+start_index <- 1
+end_index   <- window_size
+
+# Numero massimo di step di rolling possibili
+n_roll <- n_obs - window_size
+n_roll
+```
+
+## Model Estimation
+
+```{r}
+
+library(dplyr)
+
+# y e X dal dataset laggato (già definito)
+y_all <- df_ardl_lagged$d_Sentiment
+X_all <- df_ardl_lagged %>% dplyr::select(-d_Sentiment)
+
+n_obs <- length(y_all)
+initial_frac <- 0.80
+window_size <- floor(initial_frac * n_obs)
+n_roll <- n_obs - window_size
+
+# Vettori per salvare risultati
+forecasts <- numeric(n_roll)
+actuals <- numeric(n_roll)
+errors <- numeric(n_roll)
+
+# FORMULA DEL MODELLO ARDL (automatica dai nomi delle colonne)
+formula_str <- paste(
+  "d_Sentiment ~",
+  paste(colnames(X_all), collapse = " + ")
+)
+formula_ardl <- as.formula(formula_str)
+print("Formula del modello:")
+print(formula_ardl)
+
+# LOOP ROLLING WINDOW
+for(i in 1:n_roll) {
+  # Indici della finestra corrente
+  start_idx <- 1 + (i - 1)
+  end_idx <- window_size + (i - 1)
+  
+  # Dati della finestra corrente
+  y_window <- y_all[start_idx:end_idx]
+  X_window <- X_all[start_idx:end_idx, ]
+  
+  # Stima del modello ARDL
+  model_ardl <- lm(formula_ardl, data = cbind(d_Sentiment = y_window, X_window))
+  
+  # PREVISIONE 1-STEP-AHEAD
+  # Usa l'ultima osservazione della finestra per prevedere la successiva
+  last_obs_idx <- end_idx + 1  # posizione del vero valore da prevedere
+  X_forecast <- X_all[last_obs_idx, ]  # lag disponibili per la previsione
+  
+  forecast <- predict(model_ardl, newdata = as.data.frame(X_forecast))
+  
+  # Salva risultati
+  forecasts[i] <- forecast
+  actuals[i] <- y_all[last_obs_idx]
+  errors[i] <- actuals[i] - forecasts[i]
+  
+  # Progress (opzionale)
+  if(i %% 10 == 0) cat("Rolling step:", i, "di", n_roll, "\n")
+}
+
+# Risultati rolling forecast
+results_rolling <- data.frame(
+  step = 1:n_roll,
+  forecast = forecasts,
+  actual = actuals,
+  error = errors
+)
+
+print("Prime 10 previsioni rolling:")
+print(head(results_rolling, 10))
+
+cat("Finestra size:", window_size, "osservazioni\n")
+cat("Numero previsioni:", n_roll, "\n")
+
+```
+
+## Model Performance
+
+```{r}
+
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+
+# === METRICHE DI PERFORMANCE ===
+rmse <- sqrt(mean(results_rolling$error^2))
+mae  <- mean(abs(results_rolling$error))
+mape <- mean(abs(results_rolling$error / results_rolling$actual)) * 100
+
+cat("=== PERFORMANCE ROLLING FORECAST ===\n")
+cat(sprintf("RMSFE: %.4f\n", rmse))
+cat(sprintf("MAFE:  %.4f\n", mae))
+cat(sprintf("MAPE:  %.2f%%\n", mape))
+cat("=====================================\n")
+
+# === GRAFICO 1: SERIE OSSERVATA vs PREVISIONI (GRANDE) ===
+p1 <- ggplot(results_rolling, aes(x = step)) +
+  geom_line(aes(y = actual, color = "Osservato"), linewidth = 1.2) +
+  geom_line(aes(y = forecast, color = "Previsione"), linewidth = 1.2, linetype = "dashed") +
+  labs(
+    title = "Rolling 1-Step-Ahead Forecast: Osservato vs Previsione",
+    x = "Step di Rolling",
+    y = "d_Sentiment (scala standardizzata)",
+    color = "Legenda"
+  ) +
+  scale_color_manual(values = c("Osservato" = "#2E86AB", "Previsione" = "#A23B72")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 12)
+  )
+
+print(p1)
+
+# === GRAFICO 2: ERRORI NEL TEMPO + DISTRIBUZIONE (2x1) ===
+p2_errors <- ggplot(results_rolling, aes(x = step, y = error)) +
+  geom_line(color = "#E74C3C", linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8, alpha = 0.7) +
+  geom_smooth(method = "loess", se = TRUE, color = "#3498DB", linewidth = 1, alpha = 0.3) +
+  labs(
+    title = "Errori di Previsione 1-Step-Ahead",
+    subtitle = "Smooth line mostra trend degli errori",
+    x = "Step di Rolling",
+    y = "Errore (Actual - Forecast)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+p2_hist <- ggplot(results_rolling, aes(x = error)) +
+  geom_histogram(bins = 30, fill = "#3498DB", alpha = 0.8, color = "white", linewidth = 0.5) +
+  geom_vline(xintercept = mean(results_rolling$error), color = "red", linewidth = 1.2, linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.8, linetype = "solid", alpha = 0.7) +
+  labs(
+    title = "Distribuzione degli Errori",
+    subtitle = paste("Media errori:", round(mean(results_rolling$error), 4)),
+    x = "Errore",
+    y = "Frequenza"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+# Stampa i due grafici separati
+print(p2_errors)
+print(p2_hist)
+
+# === TABELLA RIASSUNTIVA ===
+summary_stats <- results_rolling %>%
+  summarise(
+    N = n(),
+    Mean_Error = round(mean(error), 4),
+    RMSE = round(rmse, 4),
+    MAE = round(mae, 4),
+    MAPE_pct = round(mape, 2)
+  )
+
+print("=== STATISTICHE RIASSUNTIVE ===")
+print(summary_stats)
+
+```
+
+## Levels
+
+```{r}
+
+# === 1. OTTIENI LIVELLI ORIGINALI PER CONFRONTO ===
+# Da merged_data_1978 prendi solo Sentiment (già log + scalato)
+sentiment_levels <- merged_data_1978$Sentiment
+dates_levels <- index(merged_data_1978)
+
+# === 2. CUMULA LE PREVISIONI DELLE DIFFERENZE ===
+# I tuoi results_rolling sono su d_Sentiment (differenze scalate)
+
+# Trova dove iniziano le previsioni rolling nel dataset originale
+start_forecast_idx <- nrow(df_ardl_lagged) - n_roll + 1  # primo step rolling
+end_forecast_idx <- nrow(df_ardl_lagged)
+
+# Cumula le previsioni per tornare ai livelli
+cum_forecasts <- numeric(length(forecasts))
+cum_forecasts[1] <- sentiment_levels[start_forecast_idx - 1] + forecasts[1]  # primo livello = ultimo noto + Δ previsto
+
+for(i in 2:length(forecasts)) {
+  cum_forecasts[i] <- cum_forecasts[i-1] + forecasts[i]  # accumula le Δ
+}
+
+cum_actuals <- numeric(length(actuals))
+cum_actuals[1] <- sentiment_levels[start_forecast_idx - 1] + actuals[1]
+for(i in 2:length(actuals)) {
+  cum_actuals[i] <- cum_actuals[i-1] + actuals[i]
+}
+
+# === 3. DATASET PER GRAFICO LIVELLI ===
+results_levels_cum <- data.frame(
+  step = 1:n_roll,
+  date = dates_levels[start_forecast_idx:end_forecast_idx],
+  cum_actual = cum_actuals,
+  cum_forecast = cum_forecasts,
+  diff_error = errors  # tieni anche errore sulle differenze
+)
+
+# === 4. GRAFICO PRINCIPALE: LIVELLI ORIGINALI vs PREVISIONI CUMULATE ===
+p_cum_levels <- ggplot(results_levels_cum, aes(x = date)) +
+  geom_line(aes(y = cum_actual, color = "Osservato"), linewidth = 1.4) +
+  geom_line(aes(y = cum_forecast, color = "Previsione ARDL"), linewidth = 1.4, linetype = "dashed") +
+  labs(
+    title = "Sentiment Index: Osservato vs Previsioni ARDL (da modello sulle differenze)",
+    subtitle = "Previsioni 1-step-ahead accumulate per tornare ai livelli",
+    x = "Data",
+    y = "Sentiment (log + scalato)",
+    color = "Legenda"
+  ) +
+  scale_color_manual(values = c("Osservato" = "#2E86AB", "Previsione ARDL" = "#A23B72")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom", plot.title = element_text(size = 16, face = "bold"))
+
+print(p_cum_levels)
+
+# === 5. ERRORI CUMULATIVI ===
+cum_errors <- cum_actuals - cum_forecasts
+results_levels_cum$cum_error <- cum_errors
+
+p_cum_errors <- ggplot(results_levels_cum, aes(x = date, y = cum_error)) +
+  geom_line(color = "#E74C3C", linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +
+  labs(
+    title = "Errori Cumulativi sulle Previsioni di Livello",
+    subtitle = "Accumulazione degli errori 1-step-ahead",
+    x = "Data",
+    y = "Errore Cumulativo"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p_cum_errors)
+
+cat("RMSFE sulle differenze:", round(rmse, 4), "\n")
+cat("RMSFE cumulativo sui livelli:", round(sqrt(mean(cum_errors^2)), 4), "\n")
+
+```
+
+## Residual Diagnostic
+
+```{r}
+
+library(lmtest)
+library(car)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+
+# === 1. STIMA MODELLO COMPLETO (su tutto il campione per diagnostiche) ===
+formula_ardl_complete <- as.formula(paste("d_Sentiment ~", paste(colnames(X_all), collapse = " + ")))
+
+# Stima su tutto df_ardl_lagged (non solo finestra)
+model_complete <- lm(formula_ardl_complete, data = df_ardl_lagged)
+
+# Estrai residui e fitted values
+residuals_full <- residuals(model_complete)
+fitted_full <- fitted(model_complete)
+
+cat("=== DIAGNOSTICHE RESIDUI - MODELLO COMPLETO ===\n")
+
+# Test di normalità (Jarque-Bera)
+jb_test <- jarque.bera.test(residuals_full)
+cat("Jarque-Bera Normality Test:\n")
+print(jb_test)
+
+# Test eteroschedasticità (Breusch-Pagan)
+bp_test <- bptest(model_complete)
+cat("\nBreusch-Pagan Heteroskedasticity Test:\n")
+print(bp_test)
+
+# Test autocorrelazione (Durbin-Watson)
+dw_test <- dwtest(model_complete, alternative = "two.sided")
+cat("\nDurbin-Watson Autocorrelation Test:\n")
+print(dw_test)
+
+# VIF (multicollinearità)
+vif_values <- vif(model_complete)
+cat("\nVIF Values:\n")
+print(round(vif_values, 2))
+
+
+```
