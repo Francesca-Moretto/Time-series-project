@@ -319,7 +319,7 @@ kable(combined_tests[, c("Variable", "Stationary_ADF", "Stationary_KPSS")],
 
 ```
 
-### Scaling
+### Scaling for plot
 
 ```{r}
 #distributions scaling
@@ -380,118 +380,103 @@ ggplot(scaled_df_long, aes(x = Date, y = Value_scaled, color = Series)) +
 
 ```
 
+### Original scale + imputation of NAs
 
 ```{r}
-library(zoo) # Necessario per na.approx (interpolazione)
+library(zoo)
+library(dplyr)
 
-df_numeric <- df_scaled_converted %>%
-  dplyr::select(-Date) 
+# Scale ORIGINALI per ARDL
+diff_variables <- c("d_Sentiment", "d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
 
-# --- GESTIONE DEI VALORI MANCANTI ---
+df_numeric <- merged_df %>%
+  dplyr::select(all_of(diff_variables)) %>%
+  dplyr::slice(-1)  # Rimuove NA iniziale
 
-# PASSO 1: Rimuovi SOLO la prima riga in modo chirurgico
-df_no_first_row <- df_numeric %>%
-  dplyr::slice(-1)
-
-# PASSO 2: Controlla se ci sono buchi interni
-n_missing <- sum(is.na(df_no_first_row))
-cat("Valori mancanti interni trovati:", n_missing, "\n")
-
-# PASSO 3: Imputazione (Interpolazione) dei buchi interni
-df_numeric_imputed <- df_no_first_row %>%
-  mutate(across(everything(), ~zoo::na.approx(., na.rm = FALSE))) %>%
-  fill(everything(), .direction = "down")
-
-# Verifica finale
-if(any(is.na(df_numeric_imputed))) warning("Attenzione: ci sono ancora NA!")
-
-# --- CREAZIONE TS ---
-
-# Ora possiamo creare la TS partendo da Febbraio 1978 in sicurezza
-ts_data <- ts(df_numeric_imputed, start = c(1978, 2), frequency = 12)
-
-head(ts_data)
-
-```
-
-```{r}
-
-library(zoo) # Fondamentale per le serie temporali irregolari
-
-# 1. Selezioniamo le variabili (senza d_Income)
-df_diff <- merged_data_1978[, c("d_Sentiment", "d_Oil", "d_CPI", # d_Income rimosso
-                                "d_IndProd", "d_Unrate", "d_FedFunds")]
-
-# 2. RIMUOVIAMO LA PRIMA RIGA (Gennaio 1978)
-df_trimmed <- df_diff[-1, ]
-
-# 3. APPLICHIAMO L'INTERPOLAZIONE SUI BUCHI RIMASTI
-df_filled <- na.approx(df_trimmed, rule = 2)
-
-# Controllo di sicurezza: ora la somma degli NA deve essere 0
-if(sum(is.na(df_filled)) > 0) {
-  stop("Errore: Ci sono ancora NA! Controlla se hai colonne interamente vuote.")
-} else {
-  print("Tutti i valori mancanti sono stati riempiti correttamente.")
+# INTERPOLAZIONE COLONNA PER COLONNA (risolve errore)
+df_imputed <- df_numeric
+for(col in diff_variables) {
+  df_imputed[[col]] <- zoo::na.approx(df_numeric[[col]], na.rm = FALSE)
 }
 
-# 4. CREAZIONE DELL'OGGETTO TS
-ts_diff <- ts(df_filled, start = c(1978, 2), frequency = 12)
+# Fill finale per NA estremi
+df_final <- df_imputed %>%
+  tidyr::fill(everything(), .direction = "down")
 
-# Visualizziamo le prime righe
-head(ts_diff)
+# Verifica
+cat("NA rimanenti:", sum(is.na(df_final)), "\n")
+
+# TS per ARDL
+ts_data <- ts(df_final, start = c(1978, 2), frequency = 12)
+head(ts_data)
+
 ```
 
 ## VIFF
 
 ```{r}
-# Ho rimosso d_Income dalla formula
+library(car)
+
+# VIF su ts_data (nostro oggetto corretto)
 lm_check_diff <- lm(d_Sentiment ~ d_Oil + d_CPI + d_IndProd + d_Unrate + d_FedFunds, 
-                    data = as.data.frame(ts_diff))
+                    data = as.data.frame(ts_data))
 
 vif_diff <- car::vif(lm_check_diff)
-print("--- VIFF on differences ---")
-print(vif_diff)
+print("--- VIF sulle differenze (scale originali) ---")
+print(round(vif_diff, 2))
+
+# Tabella interpretabile
+vif_df <- data.frame(
+  Variable = names(vif_diff),
+  VIF = round(vif_diff, 2),
+  Problema = ifelse(vif_diff > 5, "⚠️ ALTO", "✅ OK")
+)
+kable(vif_df, caption = "VIF Test | <5=OK, >5=multicollinearità")
+
 ```
 
 ## Training Test Split
 
 ```{r}
-n_obs_diff <- nrow(ts_diff)
-split_point <- floor(0.80 * n_obs_diff)
+# Train/Test split 80/20 su ts_data
+n_obs <- nrow(as.data.frame(ts_data))  # nrow(ts) non funziona
+split_point <- floor(0.80 * n_obs)
 
-train_ts_diff <- window(ts_diff, end = c(time(ts_diff)[split_point]))
-test_ts_diff  <- window(ts_diff, start = c(time(ts_diff)[split_point + 1]))
+train_ts <- window(ts_data, end = c(time(ts_data)[split_point]))
+test_ts  <- window(ts_data, start = c(time(ts_data)[split_point + 1]))
 
-train_y <- train_ts_diff[, "d_Sentiment"]
-# Rimosso d_Income dalla selezione delle x
-train_x <- train_ts_diff[, c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
+# Target e predittori
+train_y <- train_ts[, "d_Sentiment"]
+train_x <- train_ts[, c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
 
-test_y <- test_ts_diff[, "d_Sentiment"]
-# Rimosso d_Income dalla selezione delle x
-test_x <- test_ts_diff[, c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
+test_y <- test_ts[, "d_Sentiment"]
+test_x <- test_ts[, c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")]
+
+# Verifica dimensioni
+cat("Train:", nrow(as.data.frame(train_ts)), "obs | Test:", nrow(as.data.frame(test_ts)), "obs\n")
+
 ```
 
 ## CFF
 
 ```{r}
-# Imposta la finestra grafica per mostrare 6 grafici (2 righe, 3 colonne)
-# (Nota: ora avrai un grafico vuoto poiché sono rimaste 5 variabili)
+# Imposta finestra grafica 2x3
 par(mfrow=c(2,3))
 
-# Elenco dei nomi delle variabili (d_Income rimosso)
+# Regressori (5 variabili)
 regressori <- c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds") 
 
-# Ciclo per stampare le CCF
+# CCF tra regressori e target su ts_data
 for(var in regressori) {
-  ccf(ts_diff[, var], ts_diff[, "d_Sentiment"], 
-      main = paste(var, "vs Sentiment"),
+  ccf(ts_data[, var], ts_data[, "d_Sentiment"], 
+      main = paste(var, "vs d_Sentiment"),
       ylab = "CCF",
-      lag.max = 12) 
+      lag.max = 12)
 }
 
-# Ripristina la finestra grafica normale
+# Ripristina layout
 par(mfrow=c(1,1))
+
 ```
 
 ## AIC BIC
@@ -548,17 +533,11 @@ ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
 ## Lag Setup
 
 ```{r}
-
 library(dplyr)
 library(rlang)
 library(tidyr)
 
 make_lagged_df <- function(df, lag_list, y_name) {
-  # df: tibble/data.frame con le serie in livelli/differenze
-  # lag_list: lista con nomi = variabili, valore = vettore di lag da creare
-  #           es: list(d_Sentiment = 1:2, d_Oil = 1, d_IndProd = 0, ...)
-  # y_name: nome della variabile target (stringa), es. "d_Sentiment"
-  
   out <- df
   
   for (var in names(lag_list)) {
@@ -566,7 +545,6 @@ make_lagged_df <- function(df, lag_list, y_name) {
     
     for (L in lags) {
       if (L == 0) {
-        # lag 0 = valore corrente -> lo rinominiamo L0_var per coerenza
         new_name <- paste0("L0_", var)
         out[[new_name]] <- out[[var]]
       } else {
@@ -576,7 +554,6 @@ make_lagged_df <- function(df, lag_list, y_name) {
     }
   }
   
-  # Rimuovi le righe con NA in y o in almeno una delle colonne lag
   cols_to_keep <- c(
     y_name,
     grep("^L[0-9]+_", names(out), value = TRUE)
@@ -592,18 +569,21 @@ make_lagged_df <- function(df, lag_list, y_name) {
 ```
 
 ```{r}
-# Base: converto ts_diff in tibble
-df_base <- as.data.frame(ts_diff) %>%
+library(dplyr)
+library(tidyr)
+
+# Base: converto ts_data → tibble
+df_base <- as.data.frame(ts_data) %>%
   as_tibble()
 
-# Definisco i lag desiderati PER ORA
+# Lag specification (perfetta!)
 lag_spec <- list(
-  d_Sentiment = 1:2,   # p = 2
+  d_Sentiment = 1:2,   # AR(1), AR(2) → p=2
   d_Oil       = 1,     # lag 1
-  d_CPI       = 1,     # lag 1
-  d_IndProd   = 0,     # lag 0
-  d_Unrate    = 0,     # lag 0
-  d_FedFunds  = 2    # lag 1 e 2
+  d_CPI       = 1:2,     # lag 1
+  d_IndProd   = 1,     # contemporaneo
+  d_Unrate    = 1:2,     # contemporaneo
+  d_FedFunds  = 1:2      # lag 2 (nota: aggiungi 0:2 se vuoi anche contemporaneo?)
 )
 
 df_ardl_lagged <- make_lagged_df(
@@ -612,10 +592,15 @@ df_ardl_lagged <- make_lagged_df(
   y_name  = "d_Sentiment"
 )
 
-# Separazione y e X, utile per stima e rolling
+# Separazione y/X
 y_ardl <- df_ardl_lagged$d_Sentiment
 X_ardl <- df_ardl_lagged %>%
   dplyr::select(-d_Sentiment)
+
+# Verifica
+cat("Osservazioni dopo lag:", nrow(df_ardl_lagged), "\n")
+cat("Lag creati:", ncol(X_ardl), "predittori\n")
+head(X_ardl)
 
 ```
 
