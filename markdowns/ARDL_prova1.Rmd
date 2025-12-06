@@ -64,6 +64,13 @@ nrow(merged_data_1978)
 start(merged_data_1978)
 end(merged_data_1978)
 
+## 1. DOPO MERGE (prima di qualsiasi pulizia)
+cat("=== DATI MANCANTI POST-MERGE ===\n")
+print(merged_data_1978)
+cat("NA per colonna:\n")
+print(colSums(is.na(merged_data_1978)))
+cat("Prima riga NA? ", all(is.na(merged_data_1978[1,])), "\n")
+cat("Ultima riga NA? ", all(is.na(merged_data_1978[nrow(merged_data_1978),])), "\n\n")
 head(merged_data)
 ```
 
@@ -532,8 +539,157 @@ ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
 
 ### For the regressors 
 ```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forecast)
+library(gridExtra)
+library(knitr)
+library(grid)
 
+# === 0. FUNZIONE DI SUPPORTO (Invariata) ===
+make_lagged_df <- function(df, lag_list, y_name) {
+  out <- df
+  for (var in names(lag_list)) {
+    lags <- lag_list[[var]]
+    for (L in lags) {
+      if (L == 0) {
+        new_name <- paste0("L0_", var)
+        out[[new_name]] <- out[[var]]
+      } else {
+        new_name <- paste0("L", L, "_", var)
+        out[[new_name]] <- dplyr::lag(out[[var]], L)
+      }
+    }
+  }
+  cols_to_keep <- c(y_name, grep("^L[0-9]+_", names(out), value = TRUE))
+  out_clean <- out %>% dplyr::select(all_of(cols_to_keep)) %>% drop_na()
+  return(out_clean)
+}
 
+# AR ottimale (recuperato dal tuo contesto)
+ar_aic_min <- results[which.min(results$AIC), "Order"]
+train_df <- as.data.frame(train_ts)
+regressori <- c("d_Oil", "d_CPI", "d_IndProd", "d_Unrate", "d_FedFunds")
+
+# === 1. LOOP GRAFICO ESTETICO ===
+all_plots <- list()
+individual_results <- data.frame()
+max_lag <- 4 
+
+# Colori personalizzati
+col_aic <- "#E74C3C" # Rosso mattone
+col_bic <- "#2C3E50" # Blu notte
+
+for(reg in regressori) {
+  
+  # --- Calcolo Statistiche (Come prima) ---
+  results_reg <- data.frame(Lag = 0:max_lag, AIC = NA, BIC = NA)
+  
+  for(lag in 0:max_lag) {
+    lag_spec_single <- list(d_Sentiment = 1:ar_aic_min)
+    lag_spec_single[[reg]] <- 0:lag 
+    
+    df_single <- make_lagged_df(train_df, lag_spec_single, "d_Sentiment")
+    
+    if(nrow(df_single) > 30) {
+      X_cols <- setdiff(names(df_single), "d_Sentiment")
+      formula_single <- as.formula(paste("d_Sentiment ~", paste(X_cols, collapse = " + ")))
+      model_single <- lm(formula_single, data = df_single)
+      
+      results_reg$AIC[results_reg$Lag == lag] <- AIC(model_single)
+      results_reg$BIC[results_reg$Lag == lag] <- BIC(model_single)
+    }
+  }
+  
+  results_reg$Regressor <- reg
+  individual_results <- rbind(individual_results, results_reg)
+  
+  # --- Trova il punto di minimo per AIC per evidenziarlo ---
+  min_aic_row <- results_reg[which.min(results_reg$AIC), ]
+  
+  # --- Creazione Grafico "Aesthetically Pleasing" ---
+  p_reg <- ggplot(results_reg, aes(x = Lag)) +
+    
+    # Linea verticale sul minimo AIC (Guida l'occhio)
+    geom_vline(xintercept = min_aic_row$Lag, color = "gray80", linetype = "dashed") +
+    
+    # Linee principali
+    geom_line(aes(y = AIC, color = "AIC"), linewidth = 1) +
+    geom_line(aes(y = BIC, color = "BIC"), linewidth = 1, linetype = "longdash") +
+    
+    # Punti
+    geom_point(aes(y = AIC, color = "AIC"), size = 2) +
+    geom_point(aes(y = BIC, color = "BIC"), size = 2) +
+    
+    # HIGHLIGHT: Cerchio grande sul minimo AIC
+    geom_point(data = min_aic_row, aes(y = AIC), 
+               color = col_aic, size = 4, shape = 21, fill = NA, stroke = 1.5) +
+    
+    # Annotazione testuale pulita per il lag ottimale
+    annotate("text", x = min_aic_row$Lag, y = min_aic_row$AIC, 
+             label = paste("Best:", min_aic_row$Lag), 
+             vjust = -1.2, size = 3, fontface = "bold", color = col_aic) +
+
+    # Colori e Legenda
+    scale_color_manual(values = c("AIC" = col_aic, "BIC" = col_bic)) +
+    
+    # Labels
+    labs(
+      title = reg, # Titolo breve per la griglia
+      subtitle = "AIC vs BIC Score",
+      x = NULL, # Rimuovi label X per pulizia (lo mettiamo nel titolo generale o sotto)
+      y = NULL,
+      color = ""
+    ) +
+    
+    # Tema Pulito
+    theme_minimal(base_family = "sans") +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, color = "#34495E"),
+      plot.subtitle = element_text(size = 9, color = "gray50"),
+      panel.grid.minor = element_blank(), # Rimuovi griglia fine
+      panel.grid.major.x = element_blank(), # Rimuovi griglia verticale (inutile qui)
+      panel.grid.major.y = element_line(color = "gray90"),
+      legend.position = "none", # Nascondiamo legenda per ogni singolo plot (ne basta una globale o intuitiva)
+      axis.text = element_text(color = "gray40")
+    )
+  
+  all_plots[[reg]] <- p_reg
+}
+
+# === 2. VISUALIZZAZIONE GRIGLIA ===
+# Aggiungo label assi globali usando gridExtra
+grid.arrange(
+  grobs = all_plots, 
+  ncol = 3,
+  top = textGrob("Individual Regressor Lag Selection (AIC focus)", gp = gpar(fontsize = 16, fontface = "bold")),
+  bottom = textGrob("Number of Lags", gp = gpar(fontsize = 12)),
+  left = textGrob("Information Criteria Value", gp = gpar(fontsize = 12, rot = 90))
+)
+
+# === 3. TABELLA E SELEZIONE (Invariata ma formattata meglio) ===
+optimal_lags <- individual_results %>%
+  group_by(Regressor) %>%
+  slice_min(AIC, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# Stampa pulita
+cat("--------------------------------------------\n")
+cat(" OPTIMAL LAGS (Based on Minimum AIC)\n")
+cat("--------------------------------------------\n")
+print(kable(optimal_lags[, c("Regressor", "Lag", "AIC", "BIC")], digits = 2))
+cat("--------------------------------------------\n")
+
+# Setup finale lista
+lag_spec <- list(
+  d_Sentiment = ar_aic_min,
+  d_Oil = optimal_lags$Lag[optimal_lags$Regressor == "d_Oil"],
+  d_CPI = optimal_lags$Lag[optimal_lags$Regressor == "d_CPI"],
+  d_IndProd = optimal_lags$Lag[optimal_lags$Regressor == "d_IndProd"],
+  d_Unrate = optimal_lags$Lag[optimal_lags$Regressor == "d_Unrate"],
+  d_FedFunds = optimal_lags$Lag[optimal_lags$Regressor == "d_FedFunds"]
+)
 ```
 
 
@@ -587,10 +743,10 @@ df_base <- as.data.frame(ts_data) %>%
 lag_spec <- list(
   d_Sentiment = 1:2,   # AR(1), AR(2) → p=2
   d_Oil       = 1,     # lag 1
-  d_CPI       = 1:2,     # lag 1
-  d_IndProd   = 1,     # contemporaneo
-  d_Unrate    = 1:2,     # contemporaneo
-  d_FedFunds  = 1:2      # lag 2 (nota: aggiungi 0:2 se vuoi anche contemporaneo?)
+  d_CPI       = 1,     # lag 1:2
+  d_IndProd   = 4,     # 1
+  d_Unrate    = 1,     # 1:2
+  d_FedFunds  = 1     # 1:2
 )
 
 df_ardl_lagged <- make_lagged_df(
