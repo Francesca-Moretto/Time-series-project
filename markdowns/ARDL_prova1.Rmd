@@ -530,6 +530,13 @@ ggplot(results_long, aes(x = Order, y = Value, color = Metric)) +
   theme_minimal()
 ```
 
+### For the regressors 
+```{r}
+
+
+```
+
+
 ## Lag Setup
 
 ```{r}
@@ -796,80 +803,233 @@ print(summary_stats)
 ## Levels
 
 ```{r}
+library(ggplot2)
+library(dplyr)
+library(scales) 
 
-# === 1. OTTIENI LIVELLI ORIGINALI PER CONFRONTO ===
-# Da merged_data_1978 prendi solo Sentiment (già log + scalato)
-sentiment_levels <- merged_data_1978$Sentiment
+# === 1. LOGICA DI CALCOLO (Preparazione Dati) ===
+# Recuperiamo i log-levels e le date originali
+log_sentiment_levels <- merged_data_1978$log_Sentiment
 dates_levels <- index(merged_data_1978)
 
-# === 2. CUMULA LE PREVISIONI DELLE DIFFERENZE ===
-# I tuoi results_rolling sono su d_Sentiment (differenze scalate)
+# Definiamo gli indici corretti per il periodo di forecast
+start_forecast_idx <- nrow(df_ardl_lagged) - n_roll + 1 + 1 
+end_forecast_idx <- nrow(df_ardl_lagged) + 1
 
-# Trova dove iniziano le previsioni rolling nel dataset originale
-start_forecast_idx <- nrow(df_ardl_lagged) - n_roll + 1  # primo step rolling
-end_forecast_idx <- nrow(df_ardl_lagged)
+# Inizializziamo i vettori per la cumulazione
+cum_log_forecasts <- numeric(n_roll)
+cum_log_actuals <- numeric(n_roll)
 
-# Cumula le previsioni per tornare ai livelli
-cum_forecasts <- numeric(length(forecasts))
-cum_forecasts[1] <- sentiment_levels[start_forecast_idx - 1] + forecasts[1]  # primo livello = ultimo noto + Δ previsto
+# Primo punto: ultimo livello noto + prima differenza prevista/reale
+cum_log_forecasts[1] <- log_sentiment_levels[start_forecast_idx - 1] + forecasts[1]
+cum_log_actuals[1] <- log_sentiment_levels[start_forecast_idx - 1] + actuals[1]
 
-for(i in 2:length(forecasts)) {
-  cum_forecasts[i] <- cum_forecasts[i-1] + forecasts[i]  # accumula le Δ
+# Ciclo cumulativo per i passi successivi
+for(i in 2:n_roll) {
+  cum_log_forecasts[i] <- cum_log_forecasts[i-1] + forecasts[i]
+  cum_log_actuals[i] <- cum_log_actuals[i-1] + actuals[i]
 }
 
-cum_actuals <- numeric(length(actuals))
-cum_actuals[1] <- sentiment_levels[start_forecast_idx - 1] + actuals[1]
-for(i in 2:length(actuals)) {
-  cum_actuals[i] <- cum_actuals[i-1] + actuals[i]
-}
+# Trasformazione inversa (esponenziale) per tornare ai livelli originali
+cum_forecast_levels <- exp(cum_log_forecasts)
+cum_actual_levels <- exp(cum_log_actuals)
 
-# === 3. DATASET PER GRAFICO LIVELLI ===
-results_levels_cum <- data.frame(
-  step = 1:n_roll,
+# Creazione dataframe per il grafico
+results_levels <- data.frame(
   date = dates_levels[start_forecast_idx:end_forecast_idx],
-  cum_actual = cum_actuals,
-  cum_forecast = cum_forecasts,
-  diff_error = errors  # tieni anche errore sulle differenze
+  actual_level = cum_actual_levels,
+  forecast_level = cum_forecast_levels
 )
 
-# === 4. GRAFICO PRINCIPALE: LIVELLI ORIGINALI vs PREVISIONI CUMULATE ===
-p_cum_levels <- ggplot(results_levels_cum, aes(x = date)) +
-  geom_line(aes(y = cum_actual, color = "Osservato"), linewidth = 1.4) +
-  geom_line(aes(y = cum_forecast, color = "Previsione ARDL"), linewidth = 1.4, linetype = "dashed") +
+# Calcolo RMSFE sui livelli per il sottotitolo
+rmse_level <- sqrt(mean((cum_actual_levels - cum_forecast_levels)^2))
+
+# === 2. GRAFICO ESTETICAMENTE MIGLIORATO (SOLO ANNI) ===
+
+# Colori
+col_obs <- "#34495E" # Grigio Bluastro Scuro
+col_for <- "#C0392B" # Rosso Scuro 
+
+p_levels <- ggplot(results_levels, aes(x = date)) +
+  
+  # 1. Linea Osservata (Sfondo solido)
+  geom_line(aes(y = actual_level, color = "Actual Data"), 
+            linewidth = 1.1, alpha = 0.7) +
+  
+  # 2. Linea Forecast (Tratteggiata)
+  geom_line(aes(y = forecast_level, color = "ARDL Forecast"), 
+            linewidth = 1.2, linetype = "dashed") +
+  
+  # 3. Gestione Colori Manuale
+  scale_color_manual(name = "", 
+                     values = c("Actual Data" = col_obs, "ARDL Forecast" = col_for)) +
+  
+  # 4. Formattazione Asse X (MODIFICATA: Solo Anni)
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") + 
+  
+  # 5. Etichette e Titoli
   labs(
-    title = "Sentiment Index: Osservato vs Previsioni ARDL (da modello sulle differenze)",
-    subtitle = "Previsioni 1-step-ahead accumulate per tornare ai livelli",
-    x = "Data",
-    y = "Sentiment (log + scalato)",
-    color = "Legenda"
+    title = "Out-of-Sample Forecast Performance",
+    subtitle = paste0("Comparison of Actual vs Forecasted Sentiment Levels (RMSFE: ", round(rmse_level, 2), ")"),
+    y = "Sentiment Index",
+    x = "", # Rimuovo label asse x
+    caption = "Model: Benchmark ARDL | Transformation: Exp(Cumulated Δlog)"
   ) +
-  scale_color_manual(values = c("Osservato" = "#2E86AB", "Previsione ARDL" = "#A23B72")) +
-  theme_minimal(base_size = 14) +
-  theme(legend.position = "bottom", plot.title = element_text(size = 16, face = "bold"))
+  
+  # 6. Tema Pulito
+  theme_minimal(base_family = "sans") +
+  theme(
+    # Titoli
+    plot.title = element_text(face = "bold", size = 16, color = "#2c3e50"),
+    plot.subtitle = element_text(size = 11, color = "gray40", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8, color = "gray60"),
+    
+    # Assi
+    axis.text.x = element_text(angle = 0, hjust = 0.5, color = "gray30"),
+    axis.text.y = element_text(color = "gray30"),
+    axis.title.y = element_text(margin = margin(r = 10), size = 10, face = "bold"),
+    
+    # Griglia (Niente righe verticali)
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(), 
+    panel.grid.major.y = element_line(color = "gray90", linetype = "dotted"),
+    
+    # Legenda in alto
+    legend.position = "top", 
+    legend.justification = "left",
+    legend.margin = margin(t = 0, b = 0),
+    legend.text = element_text(size = 10),
+    legend.key.width = unit(1.5, "cm") 
+  )
 
-print(p_cum_levels)
+print(p_levels)
 
-# === 5. ERRORI CUMULATIVI ===
-cum_errors <- cum_actuals - cum_forecasts
-results_levels_cum$cum_error <- cum_errors
-
-p_cum_errors <- ggplot(results_levels_cum, aes(x = date, y = cum_error)) +
-  geom_line(color = "#E74C3C", linewidth = 1.2) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +
-  labs(
-    title = "Errori Cumulativi sulle Previsioni di Livello",
-    subtitle = "Accumulazione degli errori 1-step-ahead",
-    x = "Data",
-    y = "Errore Cumulativo"
-  ) +
-  theme_minimal(base_size = 12)
-
-print(p_cum_errors)
-
-cat("RMSFE sulle differenze:", round(rmse, 4), "\n")
-cat("RMSFE cumulativo sui livelli:", round(sqrt(mean(cum_errors^2)), 4), "\n")
-
+# Output testuale metriche
+cat("RMSFE (Original Levels):", round(rmse_level, 4), "\n")
 ```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scales) # Utile per formattare le date
+
+# === 1. DATASET COMPLETO (Il tuo codice di preparazione rimane uguale) ===
+# Train: fino alla finestra iniziale
+train_end_date <- dates_levels[window_size + 1] 
+test_start_date <- dates_levels[window_size + 2] 
+
+# Serie livelli originali completa
+full_levels_series <- data.frame(
+  date = dates_levels,
+  sentiment = as.numeric(merged_data_1978$Sentiment)
+)
+
+# Aggiungi previsioni solo nel test set
+test_results <- results_levels %>%
+  mutate(
+    period = "Test Set",
+    type = "Previsione"
+  ) %>%
+  select(date, sentiment = forecast_level, period, type) %>%
+  bind_rows(
+    results_levels %>%
+      mutate(
+        period = "Test Set",
+        type = "Osservato"
+      ) %>%
+      select(date, sentiment = actual_level, period, type)
+  )
+
+# Train set
+train_data <- full_levels_series %>%
+  filter(date <= train_end_date) %>%
+  mutate(
+    period = "Train Set",
+    type = "Osservato"
+  )
+
+# Uniamo tutto in un unico dataframe per facilitare ggplot
+plot_data <- bind_rows(train_data, test_results)
+
+# === 2. GRAFICO ESTETICAMENTE MIGLIORATO ===
+
+# Definizione colori professionali
+color_train <- "#2C3E50"  # Grigio scuro/Blu notte (professionale)
+color_test  <- "#E74C3C"  # Rosso mattone (evidenzia bene il test)
+
+p_aesthetic <- ggplot() +
+  
+  # Aggiungiamo un'ombreggiatura di sfondo per l'area di Test (Forecast Horizon)
+  # È più elegante di una semplice linea verticale
+  annotate("rect", xmin = train_end_date, xmax = max(plot_data$date), 
+           ymin = -Inf, ymax = Inf, 
+           fill = "gray95", alpha = 0.5) +
+  
+  # Linea del Train Set (Osservato)
+  geom_line(data = plot_data %>% filter(period == "Train Set"), 
+            aes(x = date, y = sentiment, color = period), 
+            linewidth = 0.8) + # Linea leggermente più sottile per eleganza
+  
+  # Linea del Test Set (Osservato) - Continuità visiva
+  geom_line(data = plot_data %>% filter(period == "Test Set" & type == "Osservato"), 
+            aes(x = date, y = sentiment, color = period), 
+            linewidth = 0.8, alpha = 0.6) + # Leggera trasparenza per far risaltare la previsione
+  
+  # Linea del Test Set (Previsione)
+  geom_line(data = plot_data %>% filter(period == "Test Set" & type == "Previsione"), 
+            aes(x = date, y = sentiment, color = period, linetype = type), 
+            linewidth = 1, alpha = 1) + # Più marcata
+  
+  # Linea verticale di separazione (più sottile e discreta)
+  geom_vline(xintercept = train_end_date, color = "gray40", linetype = "dotted", linewidth = 0.8) +
+  
+  # Annotazione testuale migliorata (con sfondo bianco per leggibilità)
+  geom_label(aes(x = train_end_date, y = max(full_levels_series$sentiment, na.rm=TRUE)), 
+             label = "Forecast Start", 
+             hjust = 1.1, vjust = 1, 
+             fill = "white", color = "gray40", size = 3.5, label.size = 0) +
+
+  # Gestione Assi e Colori
+  scale_x_date(date_labels = "%Y", date_breaks = "5 years", expand = c(0.02, 0)) +
+  
+  scale_color_manual(values = c("Train Set" = color_train, "Test Set" = color_test)) +
+  scale_linetype_manual(values = c("Osservato" = "solid", "Previsione" = "longdash")) +
+  
+  # Labels
+  labs(
+    title = "Consumer Sentiment Index Forecast",
+    subtitle = "Confronto tra dati osservati e previsioni ARDL Rolling Window",
+    y = "Sentiment Index (Level)",
+    x = "", # Rimuoviamo la label "Data" perché è ovvia
+    caption = "Source: UMCSENT Data | Model: ARDL"
+  ) +
+  
+  # TEMA PERSONALIZZATO (Stile "Clean Financial")
+  theme_minimal(base_family = "sans") + # Usa un font sans-serif pulito
+  theme(
+    # Testi
+    plot.title = element_text(face = "bold", size = 16, color = "#2c3e50"),
+    plot.subtitle = element_text(size = 11, color = "gray40", margin = margin(b = 15)),
+    plot.caption = element_text(size = 8, color = "gray60", margin = margin(t = 10)),
+    
+    # Legenda
+    legend.position = "top",
+    legend.justification = "left",
+    legend.title = element_blank(), # Rimuovi titoli legenda ridondanti
+    legend.text = element_text(size = 10, color = "gray30"),
+    legend.key.width = unit(1.5, "cm"), # Linee legenda più lunghe per vedere meglio il tratteggio
+    
+    # Griglia e Assi
+    panel.grid.minor = element_blank(), # Via la griglia piccola
+    panel.grid.major.x = element_blank(), # Opzionale: via le righe verticali per pulizia
+    panel.grid.major.y = element_line(color = "gray90"),
+    axis.text = element_text(color = "gray40"),
+    axis.title.y = element_text(margin = margin(r = 10), color = "gray40")
+  )
+
+print(p_aesthetic)
+```
+
 
 ## Residual Diagnostic
 
@@ -921,82 +1081,7 @@ cat(ifelse(ljungbox_lag12$p.value > 0.05, "✅ No autocorrelazione seriale OK", 
 
 ```
 
-```{r}
-
-# GRAFICO 1: RESIDUI vs FITTED
-p1 <- ggplot(data.frame(resid = residuals_full, fitted = fitted_full), 
-             aes(x = fitted, y = resid)) +
-  geom_point(alpha = 0.6, color = "#3498DB") +
-  geom_smooth(method = "loess", se = TRUE, color = "red", alpha = 0.3) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  labs(title = "Residui vs Fitted Values", 
-       subtitle = "Cerca pattern (eterosdasticità)",
-       x = "Fitted Values", y = "Residui") +
-  theme_minimal()
-
-# GRAFICO 2: QQ Plot Jarque-Bera
-p2 <- ggplot(data.frame(resid = residuals_full), aes(sample = resid)) +
-  stat_qq(color = "#3498DB") +
-  stat_qq_line(color = "red", linewidth = 1) +
-  labs(title = "QQ Plot Residui (Jarque-Bera)", 
-       subtitle = paste("JB p-value:", round(jb_test$p.value, 4))) +
-  theme_minimal()
-
-# GRAFICO 3: ACF Residui con Ljung-Box bands
-acf_resid <- acf(residuals_full, plot = FALSE, lag.max = 24)
-p3 <- ggplot(data.frame(lag = acf_resid$lag[-1], acf = acf_resid$acf[-1]), 
-             aes(x = lag, y = acf)) +
-  geom_hline(yintercept = 0, color = "black") +
-  geom_hline(yintercept = c(-1.96, 1.96)/sqrt(length(residuals_full)), 
-             linetype = "dashed", color = "blue") +
-  geom_bar(stat = "identity", fill = "#3498DB", alpha = 0.7, color = "white") +
-  labs(title = "ACF Residui (Ljung-Box)", 
-       subtitle = paste("Ljung-Box lag12 p-val:", round(ljungbox_test_lag12$p.value, 4)),
-       x = "Lag", y = "ACF") +
-  theme_minimal()
-
-# GRAFICO 4: Residui nel tempo
-p4 <- ggplot(data.frame(resid = residuals_full, time = 1:length(residuals_full)), 
-             aes(x = time, y = resid)) +
-  geom_line(color = "#E74C3C", linewidth = 0.8) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  labs(title = "Residui nel Tempo", x = "Tempo", y = "Residui") +
-  theme_minimal()
-
-# Mostra grafici 2x2
-grid.arrange(p1, p2, p3, p4, ncol = 2)
 
 
 
-```
 
-```{r}
-
-diagnostics_summary <- data.frame(
-  Test = c("R²", "Adj R²", "F-stat", "N. Osservazioni",
-           "Jarque-Bera (p-val)", "Ljung-Box lag1 (p-val)", 
-           "Ljung-Box lag6 (p-val)", "Ljung-Box lag12 (p-val)"),
-  Value = c(
-    round(summary(model_complete)$r.squared, 4),
-    round(summary(model_complete)$adj.r.squared, 4),
-    round(summary(model_complete)$fstatistic[1], 2),
-    nrow(df_ardl_lagged),
-    round(jb_test$p.value, 4),
-    round(ljungbox_lag1$p.value, 4),
-    round(ljungbox_lag6$p.value, 4),
-    round(ljungbox_test_lag12$p.value, 4)
-  ),
-  Interpretation = c(
-    "Fit del modello", "Fit aggiustato", "Significatività globale", "Sample size",
-    ifelse(jb_test$p.value > 0.05, "✅ Normalità OK", "❌ Non normale"),
-    ifelse(ljungbox_lag1$p.value > 0.05, "✅ No AC lag1", "❌ AC lag1"),
-    ifelse(ljungbox_lag6$p.value > 0.05, "✅ No AC lag6", "❌ AC lag6"),
-    ifelse(ljungbox_test_lag12$p.value > 0.05, "✅ No AC seriale", "❌ AC seriale")
-  )
-)
-
-print("=== DIAGNOSTICHE COMPLETAMENTE RIASSUNTE ===")
-print(diagnostics_summary)
-cat("\n✅ Modello OK se tutti i p-value > 0.05\n")
-
-```
