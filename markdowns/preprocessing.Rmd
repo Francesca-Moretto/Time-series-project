@@ -61,6 +61,28 @@ ggplot(data_filtered, aes(x = observation_date, y = UMCSENT)) +
   labs(title = 'Consumer Sentiment Index (1978 - 2025)',
        x = "Year")
 
+ggplot(data_filtered, aes(x = observation_date, y = UMCSENT)) +
+  
+  # --- MODIFICA QUI ---
+  # Ho ridotto size a 0.4 (prima era 1). 
+  # Se lo vuoi ancora più sottile, prova 0.2
+  geom_line(color = "#0047AB", size = 0.4) + 
+  # --------------------
+
+  scale_x_date(
+    date_breaks = "2 years",
+    date_minor_breaks = "1 year",
+    date_labels = "%Y"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor.x = element_line(color = "grey90")
+  ) +
+  labs(title = 'Consumer Sentiment Index (1978 - 2025)',
+       x = "Year",
+       y = "Index Value")
+
 # Statistics
 summary(data_filtered$UMCSENT) 
 
@@ -210,82 +232,67 @@ kpss.test(diff_log)
 ### 7.2 ACF and PACF - Differenced Data
 
 ```{r}
-
-# ACF and PACF of differenced data
-par(mfrow = c(1, 2)) 
-
-# Autocorrelation Function - MA
-acf(diff_log, main = "ACF - First Difference", lag.max = 36)
-
-# Partial Autocorrelation Function - AR
-pacf(diff_log, main = "PACF - First Difference", lag.max = 36)
-
-par(mfrow = c(1, 1))
-
-# ACF values
-acf_values <- acf(diff_log, lag.max = 36, plot = FALSE)
-
-acf_table <- data.frame(
-  Lag = acf_values$lag[,,1], 
-  ACF = acf_values$acf[,,1]
-)
-print(acf_table)
-
-# PACF values
-pacf_values <- pacf(diff_log, lag.max = 36, plot = FALSE)
-
-pacf_table <- data.frame(
-  Lag = pacf_values$lag[,,1], 
-  PACF = pacf_values$acf[,,1]
-)
-print(pacf_table)
-
-# ACF
-
 library(ggplot2)
-library(gridExtra) 
+library(gridExtra)
 
+# 0. Pulizia preliminare (chiude vecchi grafici bloccati)
+graphics.off()
+
+# 1. Preparazione Dati
 diff_data_clean <- na.omit(diff_log)
-
 n_obs <- length(diff_data_clean)
 ci_threshold <- 1.96 / sqrt(n_obs)
 
+# ---------------------------------------------------------
+# 2. ACF (Autocorrelation) - Include Lag 0
+# ---------------------------------------------------------
 acf_obj <- acf(diff_data_clean, lag.max = 36, plot = FALSE)
-
 acf_df <- data.frame(
-  lag = acf_obj$lag[-1], 
-  acf_value = acf_obj$acf[-1]
+  lag = as.numeric(acf_obj$lag), 
+  acf_value = as.numeric(acf_obj$acf)
 )
 
 plot_acf <- ggplot(acf_df, aes(x = lag, y = acf_value)) +
-  geom_hline(yintercept = 0, color = "black") +
-  geom_hline(yintercept = c(-ci_threshold, ci_threshold), linetype = "dashed", color = "blue") +
-  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 0.7) +
-  geom_point(size = 2, color = "black") + 
+  geom_hline(yintercept = 0, color = "black", size = 0.3) +
+  geom_hline(yintercept = c(-ci_threshold, ci_threshold), 
+             linetype = "dashed", color = "blue", alpha = 0.6, size = 0.3) +
+  geom_segment(aes(xend = lag, yend = 0), color = "#0047AB", size = 0.5) +
+  geom_point(size = 1.5, color = "#0047AB") + 
   scale_x_continuous(breaks = seq(0, 36, 4)) +
   labs(title = "ACF - First Difference", y = "ACF", x = "Lag") +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
 
-# PACF
+# ---------------------------------------------------------
+# 3. PACF (Partial Autocorrelation)
+# ---------------------------------------------------------
 pacf_obj <- pacf(diff_data_clean, lag.max = 36, plot = FALSE)
-
 pacf_df <- data.frame(
-  lag = pacf_obj$lag, 
-  pacf_value = pacf_obj$acf
+  lag = as.numeric(pacf_obj$lag), 
+  pacf_value = as.numeric(pacf_obj$acf)
 )
 
 plot_pacf <- ggplot(pacf_df, aes(x = lag, y = pacf_value)) +
-  geom_hline(yintercept = 0, color = "black") +
-  geom_hline(yintercept = c(-ci_threshold, ci_threshold), linetype = "dashed", color = "blue") +
-  geom_segment(aes(xend = lag, yend = 0), color = "black", size = 0.7) +
-  geom_point(size = 2, color = "black") + 
+  geom_hline(yintercept = 0, color = "black", size = 0.3) +
+  geom_hline(yintercept = c(-ci_threshold, ci_threshold), 
+             linetype = "dashed", color = "blue", alpha = 0.6, size = 0.3) +
+  geom_segment(aes(xend = lag, yend = 0), color = "#0047AB", size = 0.5) +
+  geom_point(size = 1.5, color = "#0047AB") +
   scale_x_continuous(breaks = seq(0, 36, 4)) +
   labs(title = "PACF - First Difference", y = "PACF", x = "Lag") +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
 
+# ---------------------------------------------------------
+# 4. Visualizzazione Finale
+# ---------------------------------------------------------
 grid.arrange(plot_acf, plot_pacf, ncol = 2)
-
-
 ```
 
 ## 8. Training and Test sets
@@ -324,51 +331,76 @@ par(mfrow=c(1,1))
 ## 10. Model Selection (AIC/BIC Comparison)
 
 ```{r}
-
-library(tidyr) 
+library(ggplot2)
+library(tidyr)
 library(forecast)
 
+# --- 1. Calcolo dei Modelli (Il tuo codice originale) ---
 results <- data.frame(Order = integer(),
                       Type = character(),
                       AIC = numeric(),
                       BIC = numeric())
 
-# Models AR and MA of order 1 to 12
+# Assumo che 'train$log_UMCSENT' esista nel tuo ambiente. 
+# Se si chiama diversamente, aggiorna il nome qui sotto.
+target_series <- train$log_UMCSENT 
 
 for (i in 1:12) {
   
   # Model AR(i): ARIMA(i, 1, 0)
   try({
-    fit_ar <- Arima(train$log_UMCSENT, order = c(i, 1, 0))
+    fit_ar <- Arima(target_series, order = c(i, 1, 0))
     results <- rbind(results, data.frame(Order = i, Type = "AR Model", AIC = fit_ar$aic, BIC = fit_ar$bic))
   }, silent = TRUE)
   
   # Model MA(i): ARIMA(0, 1, i)
   try({
-    fit_ma <- Arima(train$log_UMCSENT, order = c(0, 1, i))
+    fit_ma <- Arima(target_series, order = c(0, 1, i))
     results <- rbind(results, data.frame(Order = i, Type = "MA Model", AIC = fit_ma$aic, BIC = fit_ma$bic))
   }, silent = TRUE)
 }
 
+# Trasformazione per ggplot
 results_long <- pivot_longer(results, cols = c("AIC", "BIC"), names_to = "Metric", values_to = "Value")
 
-# Plot
+# --- 2. Plot Stilizzato (Coerente con i precedenti) ---
 ggplot(results_long, aes(x = Order, y = Value, color = Metric, group = Metric)) +
-  geom_line(size = 1) +
-  geom_point(size = 2) +
+  
+  # Linee più sottili ed eleganti (0.6 invece di 1)
+  geom_line(size = 0.6) +
+  geom_point(size = 1.5) +
+  
+  # Assegnazione manuale dei colori
+  scale_color_manual(values = c(
+    "BIC" = "#0047AB",  # Royal Blue (coerente con gli altri grafici)
+    "AIC" = "#D55E00"   # Rosso/Arancio per contrasto (o usa "grey40" se preferisci grigio)
+  )) +
+  
+  # Divisione pannelli
   facet_wrap(~ Type, scales = "free_y") + 
+  
+  # Asse X con tutti i numeri interi
   scale_x_continuous(breaks = 1:12) +
+  
+  # Etichette
   labs(title = "AIC & BIC Comparison by Model Order",
        subtitle = "AR(p) models and MA(q) models",
        x = "Order (p or q)",
        y = "Information Criterion Value",
        color = "Metric") +
+  
+  # Tema pulito
   theme_minimal() +
   theme(
-    legend.position = "bottom",
-    strip.text = element_text(size = 12, face = "bold")
+    plot.title = element_text(hjust = 0.5, face = "bold"),    # Titolo centrato
+    plot.subtitle = element_text(hjust = 0.5),                # Sottotitolo centrato
+    strip.text = element_text(size = 12, face = "bold"),      # Titoli dei box AR/MA
+    legend.position = "bottom",                               # Legenda sotto
+    panel.grid.minor = element_blank()                        # Rimuove griglia inutile
   )
 
+# Salva
+ggsave("AIC_BIC_Comparison.png", width = 10, height = 5, dpi = 300)
 ```
 
 ```{r}
@@ -842,8 +874,382 @@ ggplot(df_total, aes(x = Date, y = Value, color = Type)) +
 ### ARIMA (1,1,2)
 
 ```{r}
+library(forecast)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(tidyr)
+library(scales)
 
+# --- 0. PREPARAZIONE DATI ---
+nrows <- nrow(data_filtered)
+index_division <- floor(0.80 * nrows)
+
+train <- subset(data_filtered, 1:nrows <= index_division)
+test <- subset(data_filtered, 1:nrows > index_division)
+
+cat("Training set size:", nrow(train), "\n")
+cat("Test set size:", nrow(test), "\n")
+
+full_series <- data_filtered$log_UMCSENT
+n_train <- nrow(train)
+n_test <- nrow(test)
+
+# --- 1. FUNZIONE ANALISI MODELLO (STILE AGGIORNATO) ---
+run_arima_analysis <- function(order_vec, model_name) {
+  
+  cat(paste0("\n========================================\n"))
+  cat(paste0("   Model Analysis: ", model_name, "\n"))
+  cat(paste0("========================================\n"))
+  
+  fit <- Arima(train$log_UMCSENT, order = order_vec)
+  
+  res_vals <- residuals(fit)
+  
+  # Shapiro Test
+  shapiro_res <- shapiro.test(res_vals)
+  
+  # --- QQ-PLOT STILIZZATO (Royal Blue & Red) ---
+  res_df <- data.frame(Residuals = as.numeric(res_vals))
+  
+  p_qq <- ggplot(res_df, aes(sample = Residuals)) +
+    stat_qq(color = "#0047AB", alpha = 0.6, size = 1.5) + # Punti Blu
+    stat_qq_line(color = "#D55E00", linewidth = 0.8) +    # Linea Rossa
+    labs(title = paste("QQ-Plot Residuals -", model_name),
+         subtitle = paste("Shapiro p-value:", round(shapiro_res$p.value, 4)),
+         x = "Theoretical Quantiles", y = "Sample Quantiles") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  # Rolling Forecast Loop
+  cat("\nStarting Rolling Forecast...\n")
+  rolling_preds <- numeric(n_test)
+  
+  for (i in 1:n_test) {
+    current_data <- full_series[1:(n_train + i - 1)]
+    try({
+      fit_temp <- Arima(current_data, order = order_vec)
+      rolling_preds[i] <- forecast(fit_temp, h = 1)$mean
+    }, silent = TRUE)
+    if(i %% 20 == 0) cat(".") 
+  }
+  cat("\nRolling Forecast Completed.\n")
+  
+  actuals <- test$log_UMCSENT
+  rmse_val <- sqrt(mean((rolling_preds - actuals)^2, na.rm = TRUE))
+  mae_val <- mean(abs(rolling_preds - actuals), na.rm = TRUE)
+  mape_val <- mean(abs((rolling_preds - actuals)/actuals), na.rm = TRUE) * 100
+  aic_val <- fit$aic
+  bic_val <- fit$bic
+  
+  # --- PLOT FORECAST GENERALE (Overview) ---
+  df_plot_train <- data.frame(Date = train$observation_date, Value = train$log_UMCSENT, Type = "Training Data")
+  df_plot_test <- data.frame(Date = test$observation_date, Value = test$log_UMCSENT, Type = "Actual Test Data")
+  df_plot_forecast <- data.frame(Date = test$observation_date, Value = rolling_preds, Type = "Rolling Forecast")
+  
+  df_total <- rbind(df_plot_train, df_plot_test, df_plot_forecast)
+  
+  p_forecast <- ggplot(df_total, aes(x = Date, y = Value, color = Type)) +
+    geom_line(linewidth = 0.6) + # Linea sottile ed elegante
+    scale_color_manual(values = c("Training Data" = "gray70", 
+                                  "Actual Test Data" = "#333333", # Grigio scuro/Nero
+                                  "Rolling Forecast" = "#0047AB")) + # TUO BLU
+    geom_vline(xintercept = min(test$observation_date), linetype="dashed", color="#D55E00", alpha=0.5) +
+    labs(title = paste("Rolling Forecast Overview:", model_name),
+         subtitle = paste("RMSE:", round(rmse_val, 4), "| MAE:", round(mae_val, 4)),
+         y = "Log(Consumer Sentiment)", x = "Date") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.position = "bottom"
+    )
+
+  return(list(
+    name = model_name,
+    rmse = rmse_val, mae = mae_val, mape = mape_val,
+    aic = aic_val, bic = bic_val,
+    plot_qq = p_qq,
+    plot_forecast_data = df_total # Salviamo i dati per usarli nel plot zoom dopo
+  ))
+}
+
+# --- 2. ESECUZIONE ANALISI ---
+results_013 <- run_arima_analysis(order_vec = c(0, 1, 3), model_name = "ARIMA(0,1,3)")
+results_112 <- run_arima_analysis(order_vec = c(1, 1, 2), model_name = "ARIMA(1,1,2)")
+
+# --- 3. CONFRONTO MODELLI (BAR CHART) ---
+comparison_table <- data.frame(
+  Model = c(results_013$name, results_112$name),
+  AIC = c(results_013$aic, results_112$aic),
+  RMSE = c(results_013$rmse, results_112$rmse),
+  MAE = c(results_013$mae, results_112$mae)
+)
+
+results_long <- pivot_longer(comparison_table, cols = c(RMSE, MAE, AIC), names_to = "Metric", values_to = "Value")
+
+p_comparison <- ggplot(results_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.6) +
+  facet_wrap(~ Metric, scales = "free_y") +
+  # Usiamo i tuoi colori per distinguere i modelli
+  scale_fill_manual(values = c("ARIMA(0,1,3)" = "#7CAE00",  # Verde (o altro colore neutro)
+                               "ARIMA(1,1,2)" = "#0047AB")) + # BLU (Il modello "Target")
+  labs(title = "Model Comparison Metrics", y = "Value", x = "") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+
+# --- 4. FUNZIONE FORECAST ZOOM (ESTETICA FINALE) ---
+plot_zoom_forecast_aesthetic <- function(model_result) {
+  
+  # Filtro dati: Solo Test vs Forecast
+  df_all <- model_result$plot_forecast_data
+  df_zoom <- subset(df_all, Type != "Training Data")
+  
+  # Colori Estetici Coerenti
+  col_actual <- "#808080"   # Grigio scuro quasi nero
+  col_forecast <- "#0047AB" # Royal Blue
+  
+  ggplot(df_zoom, aes(x = Date, y = exp(Value), color = Type)) + # exp() se vuoi tornare alla scala originale
+    
+    # Linee: Forecast leggermente trasparente per vedere sovrapposizioni
+    geom_line(aes(alpha = Type), linewidth = 0.8) + 
+    
+    scale_color_manual(values = c("Actual Test Data" = col_actual, 
+                                  "Rolling Forecast" = col_forecast)) +
+    
+    scale_alpha_manual(values = c("Actual Test Data" = 0.8, 
+                                  "Rolling Forecast" = 1), guide="none") +
+    
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    
+    labs(title = paste("Forecasting:", model_result$name),
+         subtitle = "Real vs Forecasted values (Original Scale)",
+         y = "Consumer Sentiment Index", 
+         x = "", 
+         color = "") + 
+    
+    theme_minimal() +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      plot.subtitle = element_text(hjust = 0.5),
+      panel.grid.minor.x = element_blank(), # Meno rumore visivo
+      panel.grid.major.x = element_line(color = "grey90")
+    )
+}
+
+# --- 5. STAMPA DI TUTTI I GRAFICI ---
+
+# 1. QQ Plots
+grid.arrange(results_013$plot_qq, results_112$plot_qq, ncol = 2)
+
+# 2. Comparison Metrics
+print(p_comparison)
+
+# 3. Zoom Forecast (Quello bello per il paper)
+print(plot_zoom_forecast_aesthetic(results_112))
 ```
+
+```{r}
+library(forecast)
+library(ggplot2)
+
+# 0. Pulizia preliminare (evita conflitti grafici)
+graphics.off() 
+
+# 1. Preparazione Dati
+# Assicurati che 'data_filtered' sia già caricato nel tuo ambiente
+nrows <- nrow(data_filtered)
+index_division <- floor(0.80 * nrows)
+
+train <- subset(data_filtered, 1:nrows <= index_division)
+test <- subset(data_filtered, 1:nrows > index_division)
+
+cat("Training set size:", nrow(train), "\n")
+cat("Test set size:", nrow(test), "\n")
+
+# --- MODELLO STATICO ---
+# CORREZIONE: Ho impostato c(0,1,3) per coerenza con il nome 'arima013' e il loop
+arima013 <- Arima(train$log_UMCSENT, order = c(0, 1, 3)) 
+print(summary(arima013))
+
+# Shapiro Test
+shapiro_test <- shapiro.test(residuals(arima013))
+cat("Shapiro-Wilk test p-value:", shapiro_test$p.value, "\n")
+
+# --- 2. QQ-PLOT STILIZZATO (Blue & Red) ---
+res_data <- data.frame(Residuals = as.numeric(residuals(arima013)))
+
+ggplot(res_data, aes(sample = Residuals)) +
+  # Punti in Royal Blue
+  stat_qq(color = "#0047AB", alpha = 0.6, size = 1.5) + 
+  # Linea in Rosso Vermiglio
+  stat_qq_line(color = "#D55E00", linewidth = 0.8) +             
+  labs(title = "Normal Q-Q Plot of Residuals",
+       subtitle = paste("Shapiro p-value:", round(shapiro_test$p.value, 4)),
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+# --- 3. ROLLING WINDOW FORECAST ---
+cat("\nStarting Rolling Forecast...\n")
+
+full_series <- data_filtered$log_UMCSENT
+n_train <- nrow(train)
+n_test <- nrow(test)
+
+rolling_preds <- numeric(n_test)
+
+for (i in 1:n_test) {
+  current_data <- full_series[1:(n_train + i - 1)]
+  # Assicurati che l'ordine qui sia quello che vuoi testare (0,1,3)
+  fit_temp <- Arima(current_data, order = c(0, 1, 3)) 
+  rolling_preds[i] <- forecast(fit_temp, h = 1)$mean
+  if(i %% 20 == 0) cat(".")
+}
+cat("\nRolling Forecast Completed.\n")
+
+# Metriche RMSE / MAE
+actuals <- test$log_UMCSENT
+rmse_val <- sqrt(mean((rolling_preds - actuals)^2))
+mae_val <- mean(abs(rolling_preds - actuals))
+mape_val <- mean(abs((rolling_preds - actuals)/actuals)) * 100
+
+cat("\n--- Rolling Forecast Accuracy ---\n")
+cat("RMSE:", rmse_val, "\n")
+cat("MAE :", mae_val, "\n")
+cat("MAPE:", mape_val, "%\n")
+
+# --- 4. GRAFICO FINALE (STILE AGGIORNATO) ---
+
+# Creazione Dataframe unico per ggplot
+df_plot_train <- data.frame(Date = train$observation_date, Value = train$log_UMCSENT, Type = "Training Data")
+df_plot_test <- data.frame(Date = test$observation_date, Value = test$log_UMCSENT, Type = "Actual Test Data")
+df_plot_forecast <- data.frame(Date = test$observation_date, Value = rolling_preds, Type = "Rolling Forecast")
+
+df_total <- rbind(df_plot_train, df_plot_test, df_plot_forecast)
+
+ggplot(df_total, aes(x = Date, y = Value, color = Type)) +
+  
+  # Usiamo alpha (trasparenza) e linewidth variabili
+  geom_line(aes(alpha = Type, linewidth = Type)) +
+  
+  # --- COLORI COERENTI ---
+  scale_color_manual(values = c("Training Data" = "gray85",      # Molto chiaro, solo contesto
+                                "Actual Test Data" = "#778899",  # Slate Grey (leggibile ma sfondo)
+                                "Rolling Forecast" = "#0047AB")) + # Royal Blue (Focus)
+  
+  # --- SPESSORI ---
+  scale_linewidth_manual(values = c("Training Data" = 0.5, 
+                                    "Actual Test Data" = 0.6, 
+                                    "Rolling Forecast" = 0.8), guide = "none") +
+  
+  # --- TRASPARENZA ---
+  scale_alpha_manual(values = c("Training Data" = 1, 
+                                "Actual Test Data" = 0.7, # Leggermente trasparente per far vedere la forecast
+                                "Rolling Forecast" = 1), guide = "none") +
+  
+  # Linea verticale di separazione (Rossa tratteggiata)
+  geom_vline(xintercept = min(test$observation_date), 
+             linetype="dashed", color="#D55E00", alpha=0.6) +
+  
+  labs(title = "ARIMA(0,1,3) Rolling Forecast vs Actual Data",
+       subtitle = paste("One-step ahead prediction | RMSE:", round(rmse_val, 4)),
+       y = "Log(Consumer Sentiment)",
+       x = "Date") +
+  
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank() # Rimuove griglia inutile
+  )
+```
+
+```{r}
+library(forecast)
+library(ggplot2)
+library(gridExtra)
+
+# 0. Pulizia
+graphics.off()
+
+# 1. Preparazione Dati
+nrows <- nrow(data_filtered)
+index_division <- floor(0.80 * nrows)
+train <- subset(data_filtered, 1:nrows <= index_division)
+test <- subset(data_filtered, 1:nrows > index_division)
+
+# --- MODELLO ---
+# Usiamo c(0,1,3) come richiesto
+arima013 <- Arima(train$log_UMCSENT, order = c(0, 1, 3)) 
+
+# Estrazione Residui
+res_vals <- residuals(arima013)
+res_df <- data.frame(
+  Time = as.numeric(time(res_vals)), 
+  Residuals = as.numeric(res_vals)
+)
+
+# --- 2. CREAZIONE DEI 3 GRAFICI DIAGNOSTICI STILIZZATI ---
+
+# A) Grafico Serie Temporale dei Residui (In alto)
+p_ts <- ggplot(res_df, aes(x = Time, y = Residuals)) +
+  geom_line(color = "#333333", size = 0.5) + # Grigio scuro per i residui
+  geom_hline(yintercept = 0, color = "#D55E00", linetype = "dashed") + # Linea zero rossa
+  labs(title = "Residuals from ARIMA(0,1,3)", y = "Residuals", x = "Time") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+# B) Grafico ACF dei Residui (In basso a sinistra)
+# Calcoliamo l'ACF manualmente per passarlo a ggplot
+acf_obj <- acf(res_vals, plot = FALSE, lag.max = 25)
+acf_df <- data.frame(lag = as.numeric(acf_obj$lag)[-1], acf = as.numeric(acf_obj$acf)[-1]) # Rimuovo lag 0
+ci <- 1.96 / sqrt(length(res_vals))
+
+p_acf <- ggplot(acf_df, aes(x = lag, y = acf)) +
+  geom_hline(yintercept = 0, color = "black", size = 0.3) +
+  geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "#D55E00") + # CI Rosso
+  geom_segment(aes(xend = lag, yend = 0), color = "#0047AB") + # Linee Blu
+  geom_point(color = "#0047AB", size = 1.5) +                  # Punti Blu
+  labs(title = "ACF of Residuals", y = "ACF", x = "Lag") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+# C) Istogramma dei Residui (In basso a destra)
+p_hist <- ggplot(res_df, aes(x = Residuals)) +
+  # Istogramma Blu
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "#0047AB", alpha = 0.7, color = "white") + 
+  # Curva Normale Rossa (sovrapposta per confronto)
+  stat_function(fun = dnorm, args = list(mean = mean(res_vals, na.rm=T), sd = sd(res_vals, na.rm=T)), 
+                color = "#D55E00", size = 1) +
+  labs(title = "Histogram of Residuals", y = "Density", x = "Residuals") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+# --- 3. COMPOSIZIONE FINALE (Layout stile checkresiduals) ---
+# Dispone: Serie temporale in alto (larga), ACF e Istogramma sotto
+layout_matrix <- rbind(c(1, 1),
+                       c(2, 3))
+
+grid.arrange(p_ts, p_acf, p_hist, layout_matrix = layout_matrix)
+
+# Shapiro Test (Stampato in console)
+shapiro_test <- shapiro.test(res_vals)
+cat("\nShapiro-Wilk test p-value:", shapiro_test$p.value, "\n")
+```
+
 
 ## 11. Residual Diagnostics
 
